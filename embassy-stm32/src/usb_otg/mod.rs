@@ -3,7 +3,7 @@ use crate::rcc::RccPeripheral;
 
 #[cfg(feature = "nightly")]
 mod usb;
-use embassy::interrupt::Interrupt;
+use embassy_cortex_m::interrupt::Interrupt;
 #[cfg(feature = "nightly")]
 pub use usb::*;
 
@@ -92,10 +92,12 @@ foreach_interrupt!(
         }
     };
 
-    (otghs, $inst:ident) => {
+    ($inst:ident, otghs, $block:ident, GLOBAL, $irq:ident) => {
         impl sealed::Instance for peripherals::$inst {
-            const REGISTERS: *const () = crate::pac::$inst.0 as *const ();
-            const HIGH_SPEED: bool = true;
+            fn regs() -> crate::pac::otgfs::OtgFs {
+                crate::pac::USB_OTG_FS
+            }
+            const HIGH_SPEED: bool = false;
 
             cfg_if::cfg_if! {
                 if #[cfg(any(
@@ -126,6 +128,8 @@ foreach_interrupt!(
             }
         }
 
-        impl Instance for peripherals::$inst {}
+        impl Instance for peripherals::$inst {
+            type Interrupt = crate::interrupt::$irq;
+        }
     };
 );
