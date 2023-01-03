@@ -2,11 +2,15 @@ use core::convert::TryFrom;
 
 use super::{set_freqs, Clocks};
 use crate::pac::flash::vals::Latency;
-use crate::pac::rcc::vals::{Adcpre, Hpre, Pllmul, Pllsrc, Ppre1, Sw, Usbpre};
+use crate::pac::rcc::vals::*;
 use crate::pac::{FLASH, RCC};
 use crate::time::Hertz;
 
-const HSI: u32 = 8_000_000;
+/// HSI speed
+pub const HSI_FREQ: Hertz = Hertz(8_000_000);
+
+/// LSI speed
+pub const LSI_FREQ: Hertz = Hertz(40_000);
 
 /// Configuration of the clocks
 ///
@@ -23,12 +27,12 @@ pub struct Config {
 }
 
 pub(crate) unsafe fn init(config: Config) {
-    let pllsrcclk = config.hse.map(|hse| hse.0).unwrap_or(HSI / 2);
+    let pllsrcclk = config.hse.map(|hse| hse.0).unwrap_or(HSI_FREQ.0 / 2);
     let sysclk = config.sys_ck.map(|sys| sys.0).unwrap_or(pllsrcclk);
     let pllmul = sysclk / pllsrcclk;
 
     let (pllmul_bits, real_sysclk) = if pllmul == 1 {
-        (None, config.hse.map(|hse| hse.0).unwrap_or(HSI))
+        (None, config.hse.map(|hse| hse.0).unwrap_or(HSI_FREQ.0))
     } else {
         let pllmul = core::cmp::min(core::cmp::max(pllmul, 1), 16);
         (Some(pllmul as u8 - 2), pllsrcclk * pllmul)
@@ -110,6 +114,7 @@ pub(crate) unsafe fn init(config: Config) {
     // the USB clock is only valid if an external crystal is used, the PLL is enabled, and the
     // PLL output frequency is a supported one.
     // usbpre == false: divide clock by 1.5, otherwise no division
+    #[cfg(not(rcc_f100))]
     let (usbpre, _usbclk_valid) = match (config.hse, pllmul_bits, real_sysclk) {
         (Some(_), Some(_), 72_000_000) => (false, true),
         (Some(_), Some(_), 48_000_000) => (true, true),
@@ -154,6 +159,7 @@ pub(crate) unsafe fn init(config: Config) {
         w.set_ppre2(Ppre1(ppre2_bits));
         w.set_ppre1(Ppre1(ppre1_bits));
         w.set_hpre(Hpre(hpre_bits));
+        #[cfg(not(rcc_f100))]
         w.set_usbpre(Usbpre(usbpre as u8));
         w.set_sw(Sw(if pllmul_bits.is_some() {
             // PLL

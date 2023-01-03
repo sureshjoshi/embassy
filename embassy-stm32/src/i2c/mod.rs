@@ -1,12 +1,18 @@
 #![macro_use]
 
-use embassy::interrupt::Interrupt;
+use crate::interrupt::Interrupt;
 
 #[cfg_attr(i2c_v1, path = "v1.rs")]
 #[cfg_attr(i2c_v2, path = "v2.rs")]
 mod _version;
-use crate::peripherals;
 pub use _version::*;
+
+#[cfg(feature = "time")]
+mod timeout;
+#[cfg(feature = "time")]
+pub use timeout::*;
+
+use crate::peripherals;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

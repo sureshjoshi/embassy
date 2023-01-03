@@ -3,20 +3,19 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::*;
-use embassy::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy::channel::channel::Channel;
-use embassy::executor::Spawner;
+use embassy_executor::Spawner;
 use embassy_nrf::peripherals::UARTE0;
 use embassy_nrf::uarte::UarteRx;
-use embassy_nrf::{interrupt, uarte, Peripherals};
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use embassy_nrf::{interrupt, uarte};
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::channel::Channel;
+use {defmt_rtt as _, panic_probe as _};
 
 static CHANNEL: Channel<ThreadModeRawMutex, [u8; 8], 1> = Channel::new();
 
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let mut config = uarte::Config::default();
     config.parity = uarte::Parity::EXCLUDED;
     config.baudrate = uarte::Baudrate::BAUD115200;
@@ -50,7 +49,7 @@ async fn main(spawner: Spawner, p: Peripherals) {
     }
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn reader(mut rx: UarteRx<'static, UARTE0>) {
     let mut buf = [0; 8];
     loop {

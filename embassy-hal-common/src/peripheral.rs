@@ -1,156 +1,173 @@
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
+use core::ops::{Deref, DerefMut};
 
-use cortex_m::peripheral::scb::VectActive;
-use cortex_m::peripheral::{NVIC, SCB};
-use embassy::interrupt::{Interrupt, InterruptExt};
-
-/// A type which can be used as state with `PeripheralMutex`.
+/// An exclusive reference to a peripheral.
 ///
-/// It needs to be `Send` because `&mut` references are sent back and forth between the 'thread' which owns the `PeripheralMutex` and the interrupt,
-/// and `&mut T` is only `Send` where `T: Send`.
-pub trait PeripheralState: Send {
-    type Interrupt: Interrupt;
-    fn on_interrupt(&mut self);
+/// This is functionally the same as a `&'a mut T`. The reason for having a
+/// dedicated struct is memory efficiency:
+///
+/// Peripheral singletons are typically either zero-sized (for concrete peripherals
+/// like `PA9` or `Spi4`) or very small (for example `AnyPin` which is 1 byte).
+/// However `&mut T` is always 4 bytes for 32-bit targets, even if T is zero-sized.
+/// PeripheralRef stores a copy of `T` instead, so it's the same size.
+///
+/// but it is the size of `T` not the size
+/// of a pointer. This is useful if T is a zero sized type.
+pub struct PeripheralRef<'a, T> {
+    inner: T,
+    _lifetime: PhantomData<&'a mut T>,
 }
 
-pub struct StateStorage<S>(MaybeUninit<S>);
-
-impl<S> StateStorage<S> {
-    pub const fn new() -> Self {
-        Self(MaybeUninit::uninit())
-    }
-}
-
-pub struct PeripheralMutex<'a, S: PeripheralState> {
-    state: *mut S,
-    _phantom: PhantomData<&'a mut S>,
-    irq: S::Interrupt,
-}
-
-/// Whether `irq` can be preempted by the current interrupt.
-pub(crate) fn can_be_preempted(irq: &impl Interrupt) -> bool {
-    match SCB::vect_active() {
-        // Thread mode can't preempt anything.
-        VectActive::ThreadMode => false,
-        // Exceptions don't always preempt interrupts,
-        // but there isn't much of a good reason to be keeping a `PeripheralMutex` in an exception anyway.
-        VectActive::Exception(_) => true,
-        VectActive::Interrupt { irqn } => {
-            #[derive(Clone, Copy)]
-            struct NrWrap(u16);
-            unsafe impl cortex_m::interrupt::InterruptNumber for NrWrap {
-                fn number(self) -> u16 {
-                    self.0
-                }
-            }
-            NVIC::get_priority(NrWrap(irqn.into())) < irq.get_priority().into()
+impl<'a, T> PeripheralRef<'a, T> {
+    #[inline]
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner,
+            _lifetime: PhantomData,
         }
     }
-}
 
-impl<'a, S: PeripheralState> PeripheralMutex<'a, S> {
-    /// Create a new `PeripheralMutex` wrapping `irq`, with `init` initializing the initial state.
-    ///
-    /// self requires `S` to live for `'static`, because if the `PeripheralMutex` is leaked, the
-    /// interrupt won't be disabled, which may try accessing the state at any time. To use non-`'static`
-    /// state, see [`Self::new_unchecked`].
-    ///
-    /// Registers `on_interrupt` as the `irq`'s handler, and enables it.
-    pub fn new(
-        irq: S::Interrupt,
-        storage: &'a mut StateStorage<S>,
-        init: impl FnOnce() -> S,
-    ) -> Self
-    where
-        'a: 'static,
-    {
-        // safety: safe because state is `'static`.
-        unsafe { Self::new_unchecked(irq, storage, init) }
-    }
-
-    /// Create a `PeripheralMutex` without requiring the state is `'static`.
-    ///
-    /// See also [`Self::new`].
+    /// Unsafely clone (duplicate) a peripheral singleton.
     ///
     /// # Safety
-    /// The created instance must not be leaked (its `drop` must run).
-    pub unsafe fn new_unchecked(
-        irq: S::Interrupt,
-        storage: &'a mut StateStorage<S>,
-        init: impl FnOnce() -> S,
-    ) -> Self {
-        if can_be_preempted(&irq) {
-            panic!("`PeripheralMutex` cannot be created in an interrupt with higher priority than the interrupt it wraps");
+    ///
+    /// This returns an owned clone of the peripheral. You must manually ensure
+    /// only one copy of the peripheral is in use at a time. For example, don't
+    /// create two SPI drivers on `SPI1`, because they will "fight" each other.
+    ///
+    /// You should strongly prefer using `reborrow()` instead. It returns a
+    /// `PeripheralRef` that borrows `self`, which allows the borrow checker
+    /// to enforce this at compile time.
+    pub unsafe fn clone_unchecked(&mut self) -> PeripheralRef<'a, T>
+    where
+        T: Peripheral<P = T>,
+    {
+        PeripheralRef::new(self.inner.clone_unchecked())
+    }
+
+    /// Reborrow into a "child" PeripheralRef.
+    ///
+    /// `self` will stay borrowed until the child PeripheralRef is dropped.
+    pub fn reborrow(&mut self) -> PeripheralRef<'_, T>
+    where
+        T: Peripheral<P = T>,
+    {
+        // safety: we're returning the clone inside a new PeripheralRef that borrows
+        // self, so user code can't use both at the same time.
+        PeripheralRef::new(unsafe { self.inner.clone_unchecked() })
+    }
+
+    /// Map the inner peripheral using `Into`.
+    ///
+    /// This converts from `PeripheralRef<'a, T>` to `PeripheralRef<'a, U>`, using an
+    /// `Into` impl to convert from `T` to `U`.
+    ///
+    /// For example, this can be useful to degrade GPIO pins: converting from PeripheralRef<'a, PB11>` to `PeripheralRef<'a, AnyPin>`.
+    #[inline]
+    pub fn map_into<U>(self) -> PeripheralRef<'a, U>
+    where
+        T: Into<U>,
+    {
+        PeripheralRef {
+            inner: self.inner.into(),
+            _lifetime: PhantomData,
         }
-
-        let state_ptr = storage.0.as_mut_ptr();
-
-        // Safety: The pointer is valid and not used by anyone else
-        // because we have the `&mut StateStorage`.
-        state_ptr.write(init());
-
-        irq.disable();
-        irq.set_handler(|p| {
-            // Safety: it's OK to get a &mut to the state, since
-            // - We checked that the thread owning the `PeripheralMutex` can't preempt us in `new`.
-            //   Interrupts' priorities can only be changed with raw embassy `Interrupts`,
-            //   which can't safely store a `PeripheralMutex` across invocations.
-            // - We can't have preempted a with() call because the irq is disabled during it.
-            let state = &mut *(p as *mut S);
-            state.on_interrupt();
-        });
-        irq.set_handler_context(state_ptr as *mut ());
-        irq.enable();
-
-        Self {
-            irq,
-            state: state_ptr,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn with<R>(&mut self, f: impl FnOnce(&mut S) -> R) -> R {
-        self.irq.disable();
-
-        // Safety: it's OK to get a &mut to the state, since the irq is disabled.
-        let state = unsafe { &mut *self.state };
-        let r = f(state);
-
-        self.irq.enable();
-
-        r
-    }
-
-    /// Returns whether the wrapped interrupt is currently in a pending state.
-    pub fn is_pending(&self) -> bool {
-        self.irq.is_pending()
-    }
-
-    /// Forces the wrapped interrupt into a pending state.
-    pub fn pend(&self) {
-        self.irq.pend()
-    }
-
-    /// Forces the wrapped interrupt out of a pending state.
-    pub fn unpend(&self) {
-        self.irq.unpend()
-    }
-
-    /// Gets the priority of the wrapped interrupt.
-    pub fn priority(&self) -> <S::Interrupt as Interrupt>::Priority {
-        self.irq.get_priority()
     }
 }
 
-impl<'a, S: PeripheralState> Drop for PeripheralMutex<'a, S> {
-    fn drop(&mut self) {
-        self.irq.disable();
-        self.irq.remove_handler();
+impl<'a, T> Deref for PeripheralRef<'a, T> {
+    type Target = T;
 
-        // safety:
-        // - we initialized the state in `new`, so we know it's initialized.
-        // - the irq is disabled, so it won't preempt us while dropping.
-        unsafe { self.state.drop_in_place() }
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'a, T> DerefMut for PeripheralRef<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+/// Trait for any type that can be used as a peripheral of type `P`.
+///
+/// This is used in driver constructors, to allow passing either owned peripherals (e.g. `TWISPI0`),
+/// or borrowed peripherals (e.g. `&mut TWISPI0`).
+///
+/// For example, if you have a driver with a constructor like this:
+///
+/// ```ignore
+/// impl<'d, T: Instance> Twim<'d, T> {
+///     pub fn new(
+///         twim: impl Peripheral<P = T> + 'd,
+///         irq: impl Peripheral<P = T::Interrupt> + 'd,
+///         sda: impl Peripheral<P = impl GpioPin> + 'd,
+///         scl: impl Peripheral<P = impl GpioPin> + 'd,
+///         config: Config,
+///     ) -> Self { .. }
+/// }
+/// ```
+///
+/// You may call it with owned peripherals, which yields an instance that can live forever (`'static`):
+///
+/// ```ignore
+/// let mut twi: Twim<'static, ...> = Twim::new(p.TWISPI0, irq, p.P0_03, p.P0_04, config);
+/// ```
+///
+/// Or you may call it with borrowed peripherals, which yields an instance that can only live for as long
+/// as the borrows last:
+///
+/// ```ignore
+/// let mut twi: Twim<'_, ...> = Twim::new(&mut p.TWISPI0, &mut irq, &mut p.P0_03, &mut p.P0_04, config);
+/// ```
+///
+/// # Implementation details, for HAL authors
+///
+/// When writing a HAL, the intended way to use this trait is to take `impl Peripheral<P = ..>` in
+/// the HAL's public API (such as driver constructors), calling `.into_ref()` to obtain a `PeripheralRef`,
+/// and storing that in the driver struct.
+///
+/// `.into_ref()` on an owned `T` yields a `PeripheralRef<'static, T>`.
+/// `.into_ref()` on an `&'a mut T` yields a `PeripheralRef<'a, T>`.
+pub trait Peripheral: Sized {
+    /// Peripheral singleton type
+    type P;
+
+    /// Unsafely clone (duplicate) a peripheral singleton.
+    ///
+    /// # Safety
+    ///
+    /// This returns an owned clone of the peripheral. You must manually ensure
+    /// only one copy of the peripheral is in use at a time. For example, don't
+    /// create two SPI drivers on `SPI1`, because they will "fight" each other.
+    ///
+    /// You should strongly prefer using `into_ref()` instead. It returns a
+    /// `PeripheralRef`, which allows the borrow checker to enforce this at compile time.
+    unsafe fn clone_unchecked(&mut self) -> Self::P;
+
+    /// Convert a value into a `PeripheralRef`.
+    ///
+    /// When called on an owned `T`, yields a `PeripheralRef<'static, T>`.
+    /// When called on an `&'a mut T`, yields a `PeripheralRef<'a, T>`.
+    #[inline]
+    fn into_ref<'a>(mut self) -> PeripheralRef<'a, Self::P>
+    where
+        Self: 'a,
+    {
+        PeripheralRef::new(unsafe { self.clone_unchecked() })
+    }
+}
+
+impl<'b, T: DerefMut> Peripheral for T
+where
+    T::Target: Peripheral,
+{
+    type P = <T::Target as Peripheral>::P;
+
+    #[inline]
+    unsafe fn clone_unchecked(&mut self) -> Self::P {
+        self.deref_mut().clone_unchecked()
     }
 }

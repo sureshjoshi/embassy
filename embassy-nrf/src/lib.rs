@@ -1,3 +1,11 @@
+//! # Embassy nRF HAL
+//!
+//! HALs implement safe, idiomatic Rust APIs to use the hardware capabilities, so raw register manipulation is not needed.
+//!
+//! The Embassy nRF HAL targets the Nordic Semiconductor nRF family of hardware. The HAL implements both blocking and async APIs
+//! for many peripherals. The benefit of using the async APIs is that the HAL takes care of waiting for peripherals to
+//! complete operations in low power mod and handling interrupts, so that applications can focus on more important matters.
+//!
 //! ## EasyDMA considerations
 //!
 //! On nRF chips, peripherals can use the so called EasyDMA feature to offload the task of interacting
@@ -23,8 +31,8 @@
 //! ```
 //!
 //! Each peripheral struct which uses EasyDMA ([`Spim`](spim::Spim), [`Uarte`](uarte::Uarte), [`Twim`](twim::Twim)) has two variants of their mutating functions:
-//! - Functions with the suffix (e.g. [`write_from_ram`](Spim::write_from_ram), [`transfer_from_ram`](Spim::transfer_from_ram)) will return an error if the passed slice does not reside in RAM.
-//! - Functions without the suffix (e.g. [`write`](Spim::write), [`transfer`](Spim::transfer)) will check whether the data is in RAM and copy it into memory prior to transmission.
+//! - Functions with the suffix (e.g. [`write_from_ram`](spim::Spim::write_from_ram), [`transfer_from_ram`](spim::Spim::transfer_from_ram)) will return an error if the passed slice does not reside in RAM.
+//! - Functions without the suffix (e.g. [`write`](spim::Spim::write), [`transfer`](spim::Spim::transfer)) will check whether the data is in RAM and copy it into memory prior to transmission.
 //!
 //! Since copying incurs a overhead, you are given the option to choose from `_from_ram` variants which will
 //! fail and notify you, or the more convenient versions without the suffix which are potentially a little bit
@@ -37,8 +45,9 @@
 #![no_std]
 #![cfg_attr(
     feature = "nightly",
-    feature(generic_associated_types, type_alias_impl_trait)
+    feature(type_alias_impl_trait, async_fn_in_trait, impl_trait_projections)
 )]
+#![cfg_attr(feature = "nightly", allow(incomplete_features))]
 
 #[cfg(not(any(
     feature = "nrf51",
@@ -69,8 +78,17 @@ pub mod buffered_uarte;
 pub mod gpio;
 #[cfg(feature = "gpiote")]
 pub mod gpiote;
-#[cfg(not(any(feature = "_nrf5340", feature = "_nrf9160")))]
+#[cfg(any(feature = "nrf52832", feature = "nrf52833", feature = "nrf52840"))]
+pub mod i2s;
 pub mod nvmc;
+#[cfg(any(
+    feature = "nrf52810",
+    feature = "nrf52811",
+    feature = "nrf52833",
+    feature = "nrf52840",
+    feature = "_nrf9160"
+))]
+pub mod pdm;
 pub mod ppi;
 #[cfg(not(any(feature = "nrf52805", feature = "nrf52820", feature = "_nrf5340-net")))]
 pub mod pwm;
@@ -83,10 +101,12 @@ pub mod rng;
 #[cfg(not(any(feature = "nrf52820", feature = "_nrf5340-net")))]
 pub mod saadc;
 pub mod spim;
+pub mod spis;
 #[cfg(not(any(feature = "_nrf5340", feature = "_nrf9160")))]
 pub mod temp;
 pub mod timer;
 pub mod twim;
+pub mod twis;
 pub mod uarte;
 #[cfg(any(
     feature = "_nrf5340-app",
@@ -114,47 +134,64 @@ mod chip;
 
 pub use chip::EASY_DMA_SIZE;
 
+pub mod interrupt {
+    //! nRF interrupts for cortex-m devices.
+    pub use cortex_m::interrupt::{CriticalSection, Mutex};
+    pub use embassy_cortex_m::interrupt::*;
+
+    pub use crate::chip::irqs::*;
+}
+
+// Reexports
+
 #[cfg(feature = "unstable-pac")]
 pub use chip::pac;
 #[cfg(not(feature = "unstable-pac"))]
 pub(crate) use chip::pac;
-
-pub use embassy::util::Unborrow;
-pub use embassy_hal_common::unborrow;
-
 pub use chip::{peripherals, Peripherals};
-
-pub mod interrupt {
-    pub use crate::chip::irqs::*;
-    pub use cortex_m::interrupt::{CriticalSection, Mutex};
-    pub use embassy::interrupt::{declare, take, Interrupt};
-    pub use embassy_hal_common::interrupt::Priority3 as Priority;
-}
-pub use embassy_macros::interrupt;
+pub use embassy_cortex_m::executor;
+pub use embassy_cortex_m::interrupt::_export::interrupt;
+pub use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
 
 pub mod config {
+    //! Configuration options used when initializing the HAL.
+
+    /// High frequency clock source.
     pub enum HfclkSource {
+        /// Internal source
         Internal,
+        /// External source from xtal.
         ExternalXtal,
     }
 
+    /// Low frequency clock source
     pub enum LfclkSource {
+        /// Internal RC oscillator
         InternalRC,
+        /// Synthesized from the high frequency clock source.
         #[cfg(not(any(feature = "_nrf5340", feature = "_nrf9160")))]
         Synthesized,
+        /// External source from xtal.
         ExternalXtal,
+        /// External source from xtal with low swing applied.
         #[cfg(not(any(feature = "_nrf5340", feature = "_nrf9160")))]
         ExternalLowSwing,
+        /// External source from xtal with full swing applied.
         #[cfg(not(any(feature = "_nrf5340", feature = "_nrf9160")))]
         ExternalFullSwing,
     }
 
+    /// Configuration for peripherals. Default configuration should work on any nRF chip.
     #[non_exhaustive]
     pub struct Config {
+        /// High frequency clock source.
         pub hfclk_source: HfclkSource,
+        /// Low frequency clock source.
         pub lfclk_source: LfclkSource,
+        /// GPIOTE interrupt priority. Should be lower priority than softdevice if used.
         #[cfg(feature = "gpiote")]
         pub gpiote_interrupt_priority: crate::interrupt::Priority,
+        /// Time driver interrupt priority. Should be lower priority than softdevice if used.
         #[cfg(feature = "_time-driver")]
         pub time_interrupt_priority: crate::interrupt::Priority,
     }
@@ -176,6 +213,7 @@ pub mod config {
     }
 }
 
+/// Initialize peripherals with the provided configuration. This should only be called once at startup.
 pub fn init(config: config::Config) -> Peripherals {
     // Do this first, so that it panics if user is calling `init` a second time
     // before doing anything important.
@@ -235,6 +273,13 @@ pub fn init(config: config::Config) -> Peripherals {
     // init RTC time driver
     #[cfg(feature = "_time-driver")]
     time_driver::init(config.time_interrupt_priority);
+
+    // Disable UARTE (enabled by default for some reason)
+    #[cfg(feature = "_nrf9160")]
+    unsafe {
+        (*pac::UARTE0::ptr()).enable.write(|w| w.enable().disabled());
+        (*pac::UARTE1::ptr()).enable.write(|w| w.enable().disabled());
+    }
 
     peripherals
 }

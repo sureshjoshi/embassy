@@ -3,16 +3,14 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::info;
-use embassy::executor::Spawner;
+use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Pull};
 use embassy_nrf::gpiote::{InputChannel, InputChannelPolarity};
-use embassy_nrf::Peripherals;
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     info!("Starting!");
 
     let ch1 = InputChannel::new(

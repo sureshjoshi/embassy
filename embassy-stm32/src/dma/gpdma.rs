@@ -1,15 +1,13 @@
 use core::sync::atomic::{fence, Ordering};
 use core::task::Waker;
 
-use embassy::interrupt::{Interrupt, InterruptExt};
-use embassy::waitqueue::AtomicWaker;
-
-use crate::_generated::GPDMA_CHANNEL_COUNT;
-use crate::interrupt;
-use crate::pac;
-use crate::pac::gpdma::{vals, Gpdma};
+use embassy_sync::waitqueue::AtomicWaker;
 
 use super::{Request, TransferOptions, Word, WordSize};
+use crate::_generated::GPDMA_CHANNEL_COUNT;
+use crate::interrupt::{Interrupt, InterruptExt};
+use crate::pac::gpdma::{vals, Gpdma};
+use crate::{interrupt, pac};
 
 impl From<WordSize> for vals::ChTr1Dw {
     fn from(raw: WordSize) -> Self {
@@ -77,15 +75,14 @@ foreach_dma_channel! {
                 )
             }
 
-            unsafe fn start_write_repeated<W: Word>(&mut self, request: Request, repeated: W, count: usize, reg_addr: *mut W, options: TransferOptions) {
-                let buf = [repeated];
+            unsafe fn start_write_repeated<W: Word>(&mut self, request: Request, repeated: *const W, count: usize, reg_addr: *mut W, options: TransferOptions) {
                 low_level_api::start_transfer(
                     pac::$dma_peri,
                     $channel_num,
                     request,
                     low_level_api::Dir::MemoryToPeripheral,
                     reg_addr as *const u32,
-                    buf.as_ptr() as *mut u32,
+                    repeated as *mut u32,
                     count,
                     false,
                     W::bits(),

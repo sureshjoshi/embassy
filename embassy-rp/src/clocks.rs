@@ -5,7 +5,7 @@ use crate::{pac, reset};
 const XOSC_MHZ: u32 = 12;
 
 /// safety: must be called exactly once at bootup
-pub unsafe fn init() {
+pub(crate) unsafe fn init() {
     // Reset everything except:
     // - QSPI (we're using it to run this code!)
     // - PLLs (it may be suicide if that's what's clocking us)
@@ -47,11 +47,9 @@ pub unsafe fn init() {
     start_xosc();
 
     // Before we touch PLLs, switch sys and ref cleanly away from their aux sources.
-    c.clk_sys_ctrl()
-        .modify(|w| w.set_src(ClkSysCtrlSrc::CLK_REF));
+    c.clk_sys_ctrl().modify(|w| w.set_src(ClkSysCtrlSrc::CLK_REF));
     while c.clk_sys_selected().read() != 1 {}
-    c.clk_ref_ctrl()
-        .modify(|w| w.set_src(ClkRefCtrlSrc::ROSC_CLKSRC_PH));
+    c.clk_ref_ctrl().modify(|w| w.set_src(ClkRefCtrlSrc::ROSC_CLKSRC_PH));
     while c.clk_ref_selected().read() != 1 {}
 
     // Configure PLLs
@@ -124,7 +122,7 @@ pub(crate) fn clk_peri_freq() -> u32 {
     125_000_000
 }
 
-pub(crate) fn _clk_rtc_freq() -> u32 {
+pub(crate) fn clk_rtc_freq() -> u32 {
     46875
 }
 
@@ -135,9 +133,7 @@ unsafe fn start_xosc() {
         .write(|w| w.set_freq_range(pac::xosc::vals::CtrlFreqRange::_1_15MHZ));
 
     let startup_delay = (((XOSC_MHZ * 1_000_000) / 1000) + 128) / 256;
-    pac::XOSC
-        .startup()
-        .write(|w| w.set_delay(startup_delay as u16));
+    pac::XOSC.startup().write(|w| w.set_delay(startup_delay as u16));
     pac::XOSC.ctrl().write(|w| {
         w.set_freq_range(pac::xosc::vals::CtrlFreqRange::_1_15MHZ);
         w.set_enable(pac::xosc::vals::Enable::ENABLE);
@@ -145,13 +141,7 @@ unsafe fn start_xosc() {
     while !pac::XOSC.status().read().stable() {}
 }
 
-unsafe fn configure_pll(
-    p: pac::pll::Pll,
-    refdiv: u32,
-    vco_freq: u32,
-    post_div1: u8,
-    post_div2: u8,
-) {
+unsafe fn configure_pll(p: pac::pll::Pll, refdiv: u32, vco_freq: u32, post_div1: u8, post_div2: u8) {
     let ref_freq = XOSC_MHZ * 1_000_000 / refdiv;
 
     let fbdiv = vco_freq / ref_freq;
@@ -205,4 +195,41 @@ unsafe fn configure_pll(
 
     // Turn on post divider
     p.pwr().modify(|w| w.set_postdivpd(false));
+}
+
+/// Random number generator based on the ROSC RANDOMBIT register.
+///
+/// This will not produce random values if the ROSC is stopped or run at some
+/// harmonic of the bus frequency. With default clock settings these are not
+/// issues.
+pub struct RoscRng;
+
+impl RoscRng {
+    fn next_u8() -> u8 {
+        let random_reg = pac::ROSC.randombit();
+        let mut acc = 0;
+        for _ in 0..u8::BITS {
+            acc <<= 1;
+            acc |= unsafe { random_reg.read().randombit() as u8 };
+        }
+        acc
+    }
+}
+
+impl rand_core::RngCore for RoscRng {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        Ok(self.fill_bytes(dest))
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        rand_core::impls::next_u32_via_fill(self)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        rand_core::impls::next_u64_via_fill(self)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        dest.fill_with(Self::next_u8)
+    }
 }

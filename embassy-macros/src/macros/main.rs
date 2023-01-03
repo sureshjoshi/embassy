@@ -3,61 +3,42 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::util::ctxt::Ctxt;
-use crate::util::path::ModulePrefix;
-
-#[cfg(feature = "stm32")]
-const HAL: Option<&str> = Some("embassy_stm32");
-#[cfg(feature = "nrf")]
-const HAL: Option<&str> = Some("embassy_nrf");
-#[cfg(feature = "rp")]
-const HAL: Option<&str> = Some("embassy_rp");
-#[cfg(not(any(feature = "stm32", feature = "nrf", feature = "rp")))]
-const HAL: Option<&str> = None;
 
 #[derive(Debug, FromMeta)]
-struct Args {
-    #[darling(default)]
-    embassy_prefix: ModulePrefix,
+struct Args {}
 
-    #[allow(unused)]
-    #[darling(default)]
-    config: Option<syn::LitStr>,
+pub fn riscv() -> TokenStream {
+    quote! {
+        #[riscv_rt::entry]
+        fn main() -> ! {
+            let mut executor = ::embassy_executor::Executor::new();
+            let executor = unsafe { __make_static(&mut executor) };
+            executor.run(|spawner| {
+                spawner.must_spawn(__embassy_main(spawner));
+            })
+        }
+    }
 }
 
-pub fn run(args: syn::AttributeArgs, f: syn::ItemFn) -> Result<TokenStream, TokenStream> {
-    let args = Args::from_list(&args).map_err(|e| e.write_errors())?;
-
-    let fargs = f.sig.inputs.clone();
-
-    let ctxt = Ctxt::new();
-
-    if f.sig.asyncness.is_none() {
-        ctxt.error_spanned_by(&f.sig, "task functions must be async");
+pub fn cortex_m() -> TokenStream {
+    quote! {
+        #[cortex_m_rt::entry]
+        fn main() -> ! {
+            let mut executor = ::embassy_executor::Executor::new();
+            let executor = unsafe { __make_static(&mut executor) };
+            executor.run(|spawner| {
+                spawner.must_spawn(__embassy_main(spawner));
+            })
+        }
     }
-    if !f.sig.generics.params.is_empty() {
-        ctxt.error_spanned_by(&f.sig, "task functions must not be generic");
-    }
+}
 
-    if HAL.is_some() && fargs.len() != 2 {
-        ctxt.error_spanned_by(&f.sig, "main function must have 2 arguments");
-    }
-    if HAL.is_none() && fargs.len() != 1 {
-        ctxt.error_spanned_by(&f.sig, "main function must have 1 argument");
-    }
-
-    ctxt.check()?;
-
-    let embassy_prefix = args.embassy_prefix;
-    let embassy_prefix_lit = embassy_prefix.literal();
-    let embassy_path = embassy_prefix.append("embassy").path();
-    let f_body = f.block;
-
-    #[cfg(feature = "wasm")]
-    let main = quote! {
+pub fn wasm() -> TokenStream {
+    quote! {
         #[wasm_bindgen::prelude::wasm_bindgen(start)]
         pub fn main() -> Result<(), wasm_bindgen::JsValue> {
-            static EXECUTOR: #embassy_path::util::Forever<#embassy_path::executor::Executor> = #embassy_path::util::Forever::new();
-            let executor = EXECUTOR.put(#embassy_path::executor::Executor::new());
+            static EXECUTOR: ::embassy_executor::_export::StaticCell<::embassy_executor::Executor> = ::embassy_executor::_export::StaticCell::new();
+            let executor = EXECUTOR.init(::embassy_executor::Executor::new());
 
             executor.start(|spawner| {
                 spawner.spawn(__embassy_main(spawner)).unwrap();
@@ -65,61 +46,47 @@ pub fn run(args: syn::AttributeArgs, f: syn::ItemFn) -> Result<TokenStream, Toke
 
             Ok(())
         }
-    };
+    }
+}
 
-    #[cfg(all(feature = "std", not(feature = "wasm")))]
-    let main = quote! {
+pub fn std() -> TokenStream {
+    quote! {
         fn main() -> ! {
-            let mut executor = #embassy_path::executor::Executor::new();
+            let mut executor = ::embassy_executor::Executor::new();
             let executor = unsafe { __make_static(&mut executor) };
 
             executor.run(|spawner| {
                 spawner.must_spawn(__embassy_main(spawner));
             })
         }
-    };
+    }
+}
 
-    #[cfg(all(not(feature = "std"), not(feature = "wasm")))]
-    let main = {
-        let config = args
-            .config
-            .map(|s| s.parse::<syn::Expr>().unwrap())
-            .unwrap_or_else(|| {
-                syn::Expr::Verbatim(quote! {
-                    Default::default()
-                })
-            });
+pub fn run(args: syn::AttributeArgs, f: syn::ItemFn, main: TokenStream) -> Result<TokenStream, TokenStream> {
+    #[allow(unused_variables)]
+    let args = Args::from_list(&args).map_err(|e| e.write_errors())?;
 
-        let (hal_setup, peris_arg) = match HAL {
-            Some(hal) => {
-                let embassy_hal_path = embassy_prefix.append(hal).path();
-                (
-                    quote!(
-                        let p = #embassy_hal_path::init(#config);
-                    ),
-                    quote!(p),
-                )
-            }
-            None => (quote!(), quote!()),
-        };
+    let fargs = f.sig.inputs.clone();
 
-        quote! {
-            #[cortex_m_rt::entry]
-            fn main() -> ! {
-                #hal_setup
+    let ctxt = Ctxt::new();
 
-                let mut executor = #embassy_path::executor::Executor::new();
-                let executor = unsafe { __make_static(&mut executor) };
+    if f.sig.asyncness.is_none() {
+        ctxt.error_spanned_by(&f.sig, "main function must be async");
+    }
+    if !f.sig.generics.params.is_empty() {
+        ctxt.error_spanned_by(&f.sig, "main function must not be generic");
+    }
 
-                executor.run(|spawner| {
-                    spawner.must_spawn(__embassy_main(spawner, #peris_arg));
-                })
-            }
-        }
-    };
+    if fargs.len() != 1 {
+        ctxt.error_spanned_by(&f.sig, "main function must have 1 argument: the spawner.");
+    }
+
+    ctxt.check()?;
+
+    let f_body = f.block;
 
     let result = quote! {
-        #[#embassy_path::task(embassy_prefix = #embassy_prefix_lit)]
+        #[::embassy_executor::task()]
         async fn __embassy_main(#fargs) {
             #f_body
         }

@@ -3,18 +3,15 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::{info, unwrap};
-use embassy::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy::executor::Spawner;
-use embassy::mutex::Mutex;
-use embassy::time::{Duration, Timer};
-use embassy_nrf::Peripherals;
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
 static MUTEX: Mutex<ThreadModeRawMutex, u32> = Mutex::new(0);
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn my_task() {
     loop {
         {
@@ -31,8 +28,9 @@ async fn my_task() {
     }
 }
 
-#[embassy::main]
-async fn main(spawner: Spawner, _p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let _p = embassy_nrf::init(Default::default());
     unwrap!(spawner.spawn(my_task()));
 
     loop {

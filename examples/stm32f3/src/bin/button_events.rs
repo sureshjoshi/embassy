@@ -11,17 +11,14 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::*;
-use embassy::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy::channel::channel::Channel;
-use embassy::executor::Spawner;
-use embassy::time::{with_timeout, Duration, Timer};
+use embassy_executor::Spawner;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{AnyPin, Input, Level, Output, Pin, Pull, Speed};
 use embassy_stm32::peripherals::PA0;
-use embassy_stm32::Peripherals;
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_time::{with_timeout, Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
 struct Leds<'a> {
     leds: [Output<'a, AnyPin>; 8],
@@ -57,8 +54,7 @@ impl<'a> Leds<'a> {
             self.process_event(new_message).await;
         } else {
             self.leds[self.current_led].set_low();
-            if let Ok(new_message) = with_timeout(Duration::from_millis(200), CHANNEL.recv()).await
-            {
+            if let Ok(new_message) = with_timeout(Duration::from_millis(200), CHANNEL.recv()).await {
                 self.process_event(new_message).await;
             }
         }
@@ -102,8 +98,9 @@ enum ButtonEvent {
 
 static CHANNEL: Channel<ThreadModeRawMutex, ButtonEvent, 4> = Channel::new();
 
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_stm32::init(Default::default());
     let button = Input::new(p.PA0, Pull::Down);
     let button = ExtiInput::new(button, p.EXTI0);
     info!("Press the USER button...");
@@ -123,36 +120,30 @@ async fn main(spawner: Spawner, p: Peripherals) {
     spawner.spawn(led_blinker(leds)).unwrap();
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn led_blinker(mut leds: Leds<'static>) {
     loop {
         leds.show().await;
     }
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn button_waiter(mut button: ExtiInput<'static, PA0>) {
     const DOUBLE_CLICK_DELAY: u64 = 250;
     const HOLD_DELAY: u64 = 1000;
 
     button.wait_for_rising_edge().await;
     loop {
-        if with_timeout(
-            Duration::from_millis(HOLD_DELAY),
-            button.wait_for_falling_edge(),
-        )
-        .await
-        .is_err()
+        if with_timeout(Duration::from_millis(HOLD_DELAY), button.wait_for_falling_edge())
+            .await
+            .is_err()
         {
             info!("Hold");
             CHANNEL.send(ButtonEvent::Hold).await;
             button.wait_for_falling_edge().await;
-        } else if with_timeout(
-            Duration::from_millis(DOUBLE_CLICK_DELAY),
-            button.wait_for_rising_edge(),
-        )
-        .await
-        .is_err()
+        } else if with_timeout(Duration::from_millis(DOUBLE_CLICK_DELAY), button.wait_for_rising_edge())
+            .await
+            .is_err()
         {
             info!("Single click");
             CHANNEL.send(ButtonEvent::SingleClick).await;

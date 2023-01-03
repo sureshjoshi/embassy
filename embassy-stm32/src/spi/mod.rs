@@ -1,22 +1,20 @@
 #![macro_use]
 
-use core::marker::PhantomData;
 use core::ptr;
-use embassy::util::Unborrow;
-use embassy_hal_common::unborrow;
-use futures::future::join;
+
+use embassy_embedded_hal::SetConfig;
+use embassy_futures::join::join;
+use embassy_hal_common::{into_ref, PeripheralRef};
+pub use embedded_hal_02::spi::{Mode, Phase, Polarity, MODE_0, MODE_1, MODE_2, MODE_3};
 
 use self::sealed::WordSize;
-use crate::dma::{slice_ptr_parts, NoDma, Transfer};
+use crate::dma::{slice_ptr_parts, Transfer};
 use crate::gpio::sealed::{AFType, Pin as _};
 use crate::gpio::AnyPin;
-use crate::pac::spi::Spi as Regs;
-use crate::pac::spi::{regs, vals};
-use crate::peripherals;
+use crate::pac::spi::{regs, vals, Spi as Regs};
 use crate::rcc::RccPeripheral;
 use crate::time::Hertz;
-
-pub use embedded_hal_02::spi::{Mode, Phase, Polarity, MODE_0, MODE_1, MODE_2, MODE_3};
+use crate::{peripherals, Peripheral};
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -74,47 +72,41 @@ impl Config {
 }
 
 pub struct Spi<'d, T: Instance, Tx, Rx> {
-    sck: Option<AnyPin>,
-    mosi: Option<AnyPin>,
-    miso: Option<AnyPin>,
-    txdma: Tx,
-    rxdma: Rx,
+    _peri: PeripheralRef<'d, T>,
+    sck: Option<PeripheralRef<'d, AnyPin>>,
+    mosi: Option<PeripheralRef<'d, AnyPin>>,
+    miso: Option<PeripheralRef<'d, AnyPin>>,
+    txdma: PeripheralRef<'d, Tx>,
+    rxdma: PeripheralRef<'d, Rx>,
     current_word_size: WordSize,
-    phantom: PhantomData<&'d mut T>,
 }
 
 impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
-    pub fn new<F>(
-        peri: impl Unborrow<Target = T> + 'd,
-        sck: impl Unborrow<Target = impl SckPin<T>> + 'd,
-        mosi: impl Unborrow<Target = impl MosiPin<T>> + 'd,
-        miso: impl Unborrow<Target = impl MisoPin<T>> + 'd,
-        txdma: impl Unborrow<Target = Tx> + 'd,
-        rxdma: impl Unborrow<Target = Rx> + 'd,
-        freq: F,
+    pub fn new(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: impl Peripheral<P = impl SckPin<T>> + 'd,
+        mosi: impl Peripheral<P = impl MosiPin<T>> + 'd,
+        miso: impl Peripheral<P = impl MisoPin<T>> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(sck, mosi, miso);
+    ) -> Self {
+        into_ref!(peri, sck, mosi, miso);
         unsafe {
             sck.set_as_af(sck.af_num(), AFType::OutputPushPull);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             sck.set_speed(crate::gpio::Speed::VeryHigh);
             mosi.set_as_af(mosi.af_num(), AFType::OutputPushPull);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             mosi.set_speed(crate::gpio::Speed::VeryHigh);
             miso.set_as_af(miso.af_num(), AFType::Input);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             miso.set_speed(crate::gpio::Speed::VeryHigh);
         }
 
         Self::new_inner(
             peri,
-            Some(sck.degrade()),
-            Some(mosi.degrade()),
-            Some(miso.degrade()),
+            Some(sck.map_into()),
+            Some(mosi.map_into()),
+            Some(miso.map_into()),
             txdma,
             rxdma,
             freq,
@@ -122,33 +114,28 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         )
     }
 
-    pub fn new_rxonly<F>(
-        peri: impl Unborrow<Target = T> + 'd,
-        sck: impl Unborrow<Target = impl SckPin<T>> + 'd,
-        miso: impl Unborrow<Target = impl MisoPin<T>> + 'd,
-        txdma: impl Unborrow<Target = Tx> + 'd, // TODO remove
-        rxdma: impl Unborrow<Target = Rx> + 'd,
-        freq: F,
+    pub fn new_rxonly(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: impl Peripheral<P = impl SckPin<T>> + 'd,
+        miso: impl Peripheral<P = impl MisoPin<T>> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd, // TODO remove
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(sck, miso);
+    ) -> Self {
+        into_ref!(sck, miso);
         unsafe {
             sck.set_as_af(sck.af_num(), AFType::OutputPushPull);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             sck.set_speed(crate::gpio::Speed::VeryHigh);
             miso.set_as_af(miso.af_num(), AFType::Input);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             miso.set_speed(crate::gpio::Speed::VeryHigh);
         }
 
         Self::new_inner(
             peri,
-            Some(sck.degrade()),
+            Some(sck.map_into()),
             None,
-            Some(miso.degrade()),
+            Some(miso.map_into()),
             txdma,
             rxdma,
             freq,
@@ -156,32 +143,27 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         )
     }
 
-    pub fn new_txonly<F>(
-        peri: impl Unborrow<Target = T> + 'd,
-        sck: impl Unborrow<Target = impl SckPin<T>> + 'd,
-        mosi: impl Unborrow<Target = impl MosiPin<T>> + 'd,
-        txdma: impl Unborrow<Target = Tx> + 'd,
-        rxdma: impl Unborrow<Target = Rx> + 'd, // TODO remove
-        freq: F,
+    pub fn new_txonly(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: impl Peripheral<P = impl SckPin<T>> + 'd,
+        mosi: impl Peripheral<P = impl MosiPin<T>> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd, // TODO remove
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(sck, mosi);
+    ) -> Self {
+        into_ref!(sck, mosi);
         unsafe {
             sck.set_as_af(sck.af_num(), AFType::OutputPushPull);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             sck.set_speed(crate::gpio::Speed::VeryHigh);
             mosi.set_as_af(mosi.af_num(), AFType::OutputPushPull);
-            #[cfg(any(spi_v2, spi_v3, spi_v4))]
             mosi.set_speed(crate::gpio::Speed::VeryHigh);
         }
 
         Self::new_inner(
             peri,
-            Some(sck.degrade()),
-            Some(mosi.degrade()),
+            Some(sck.map_into()),
+            Some(mosi.map_into()),
             None,
             txdma,
             rxdma,
@@ -190,20 +172,30 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         )
     }
 
-    fn new_inner<F>(
-        _peri: impl Unborrow<Target = T> + 'd,
-        sck: Option<AnyPin>,
-        mosi: Option<AnyPin>,
-        miso: Option<AnyPin>,
-        txdma: impl Unborrow<Target = Tx> + 'd,
-        rxdma: impl Unborrow<Target = Rx> + 'd,
-        freq: F,
+    /// Useful for on chip peripherals like SUBGHZ which are hardwired.
+    /// The bus can optionally be exposed externally with `Spi::new()` still.
+    #[allow(dead_code)]
+    pub(crate) fn new_internal(
+        peri: impl Peripheral<P = T> + 'd,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
         config: Config,
-    ) -> Self
-    where
-        F: Into<Hertz>,
-    {
-        unborrow!(txdma, rxdma);
+    ) -> Self {
+        Self::new_inner(peri, None, None, None, txdma, rxdma, freq, config)
+    }
+
+    fn new_inner(
+        peri: impl Peripheral<P = T> + 'd,
+        sck: Option<PeripheralRef<'d, AnyPin>>,
+        mosi: Option<PeripheralRef<'d, AnyPin>>,
+        miso: Option<PeripheralRef<'d, AnyPin>>,
+        txdma: impl Peripheral<P = Tx> + 'd,
+        rxdma: impl Peripheral<P = Rx> + 'd,
+        freq: Hertz,
+        config: Config,
+    ) -> Self {
+        into_ref!(peri, txdma, rxdma);
 
         let pclk = T::frequency();
         let br = compute_baud_rate(pclk, freq.into());
@@ -293,13 +285,13 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         }
 
         Self {
+            _peri: peri,
             sck,
             mosi,
             miso,
             txdma,
             rxdma,
             current_word_size: WordSize::EightBit,
-            phantom: PhantomData,
         }
     }
 
@@ -423,10 +415,7 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         let tx_request = self.txdma.request();
         let tx_dst = T::REGS.tx_ptr();
-        unsafe {
-            self.txdma
-                .start_write(tx_request, data, tx_dst, Default::default())
-        }
+        unsafe { self.txdma.start_write(tx_request, data, tx_dst, Default::default()) }
         let tx_f = Transfer::new(&mut self.txdma);
 
         unsafe {
@@ -472,22 +461,13 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         let rx_request = self.rxdma.request();
         let rx_src = T::REGS.rx_ptr();
-        unsafe {
-            self.rxdma
-                .start_read(rx_request, rx_src, data, Default::default())
-        };
+        unsafe { self.rxdma.start_read(rx_request, rx_src, data, Default::default()) };
         let rx_f = Transfer::new(&mut self.rxdma);
 
         let tx_request = self.txdma.request();
         let tx_dst = T::REGS.tx_ptr();
         let clock_byte = 0x00u8;
-        let tx_f = crate::dma::write_repeated(
-            &mut self.txdma,
-            tx_request,
-            clock_byte,
-            clock_byte_count,
-            tx_dst,
-        );
+        let tx_f = crate::dma::write_repeated(&mut self.txdma, tx_request, &clock_byte, clock_byte_count, tx_dst);
 
         unsafe {
             set_txdmaen(T::REGS, true);
@@ -507,11 +487,7 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
         Ok(())
     }
 
-    async fn transfer_inner<W: Word>(
-        &mut self,
-        read: *mut [W],
-        write: *const [W],
-    ) -> Result<(), Error>
+    async fn transfer_inner<W: Word>(&mut self, read: *mut [W], write: *const [W]) -> Result<(), Error>
     where
         Tx: TxDma<T>,
         Rx: RxDma<T>,
@@ -537,18 +513,12 @@ impl<'d, T: Instance, Tx, Rx> Spi<'d, T, Tx, Rx> {
 
         let rx_request = self.rxdma.request();
         let rx_src = T::REGS.rx_ptr();
-        unsafe {
-            self.rxdma
-                .start_read(rx_request, rx_src, read, Default::default())
-        };
+        unsafe { self.rxdma.start_read(rx_request, rx_src, read, Default::default()) };
         let rx_f = Transfer::new(&mut self.rxdma);
 
         let tx_request = self.txdma.request();
         let tx_dst = T::REGS.tx_ptr();
-        unsafe {
-            self.txdma
-                .start_write(tx_request, write, tx_dst, Default::default())
-        }
+        unsafe { self.txdma.start_write(tx_request, write, tx_dst, Default::default()) }
         let tx_f = Transfer::new(&mut self.txdma);
 
         unsafe {
@@ -795,10 +765,13 @@ fn finish_dma(regs: Regs) {
         #[cfg(not(any(spi_v3, spi_v4)))]
         while regs.sr().read().bsy() {}
 
+        // Disable the spi peripheral
         regs.cr1().modify(|w| {
             w.set_spe(false);
         });
 
+        // The peripheral automatically disables the DMA stream on completion without error,
+        // but it does not clear the RXDMAEN/TXDMAEN flag in CR2.
         #[cfg(not(any(spi_v3, spi_v4)))]
         regs.cr2().modify(|reg| {
             reg.set_txdmaen(false);
@@ -835,9 +808,7 @@ mod eh02 {
     // some marker traits. For details, see https://github.com/rust-embedded/embedded-hal/pull/289
     macro_rules! impl_blocking {
         ($w:ident) => {
-            impl<'d, T: Instance> embedded_hal_02::blocking::spi::Write<$w>
-                for Spi<'d, T, NoDma, NoDma>
-            {
+            impl<'d, T: Instance, Tx, Rx> embedded_hal_02::blocking::spi::Write<$w> for Spi<'d, T, Tx, Rx> {
                 type Error = Error;
 
                 fn write(&mut self, words: &[$w]) -> Result<(), Self::Error> {
@@ -845,9 +816,7 @@ mod eh02 {
                 }
             }
 
-            impl<'d, T: Instance> embedded_hal_02::blocking::spi::Transfer<$w>
-                for Spi<'d, T, NoDma, NoDma>
-            {
+            impl<'d, T: Instance, Tx, Rx> embedded_hal_02::blocking::spi::Transfer<$w> for Spi<'d, T, Tx, Rx> {
                 type Error = Error;
 
                 fn transfer<'w>(&mut self, words: &'w mut [$w]) -> Result<&'w [$w], Self::Error> {
@@ -870,31 +839,25 @@ mod eh1 {
         type Error = Error;
     }
 
-    impl<'d, T: Instance, Tx, Rx> embedded_hal_1::spi::blocking::SpiBusFlush for Spi<'d, T, Tx, Rx> {
+    impl<'d, T: Instance, Tx, Rx> embedded_hal_1::spi::SpiBusFlush for Spi<'d, T, Tx, Rx> {
         fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
     }
 
-    impl<'d, T: Instance, W: Word> embedded_hal_1::spi::blocking::SpiBusRead<W>
-        for Spi<'d, T, NoDma, NoDma>
-    {
+    impl<'d, T: Instance, W: Word, Tx, Rx> embedded_hal_1::spi::SpiBusRead<W> for Spi<'d, T, Tx, Rx> {
         fn read(&mut self, words: &mut [W]) -> Result<(), Self::Error> {
             self.blocking_read(words)
         }
     }
 
-    impl<'d, T: Instance, W: Word> embedded_hal_1::spi::blocking::SpiBusWrite<W>
-        for Spi<'d, T, NoDma, NoDma>
-    {
+    impl<'d, T: Instance, W: Word, Tx, Rx> embedded_hal_1::spi::SpiBusWrite<W> for Spi<'d, T, Tx, Rx> {
         fn write(&mut self, words: &[W]) -> Result<(), Self::Error> {
             self.blocking_write(words)
         }
     }
 
-    impl<'d, T: Instance, W: Word> embedded_hal_1::spi::blocking::SpiBus<W>
-        for Spi<'d, T, NoDma, NoDma>
-    {
+    impl<'d, T: Instance, W: Word, Tx, Rx> embedded_hal_1::spi::SpiBus<W> for Spi<'d, T, Tx, Rx> {
         fn transfer(&mut self, read: &mut [W], write: &[W]) -> Result<(), Self::Error> {
             self.blocking_transfer(read, write)
         }
@@ -916,54 +879,36 @@ mod eh1 {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(all(feature = "unstable-traits", feature = "nightly"))] {
-        use core::future::Future;
-        impl<'d, T: Instance, Tx, Rx> embedded_hal_async::spi::SpiBusFlush for Spi<'d, T, Tx, Rx> {
-            type FlushFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
+#[cfg(all(feature = "unstable-traits", feature = "nightly"))]
+mod eha {
+    use super::*;
+    impl<'d, T: Instance, Tx, Rx> embedded_hal_async::spi::SpiBusFlush for Spi<'d, T, Tx, Rx> {
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
-            fn flush<'a>(&'a mut self) -> Self::FlushFuture<'a> {
-                async { Ok(()) }
-            }
+    impl<'d, T: Instance, Tx: TxDma<T>, Rx, W: Word> embedded_hal_async::spi::SpiBusWrite<W> for Spi<'d, T, Tx, Rx> {
+        async fn write(&mut self, words: &[W]) -> Result<(), Self::Error> {
+            self.write(words).await
+        }
+    }
+
+    impl<'d, T: Instance, Tx: TxDma<T>, Rx: RxDma<T>, W: Word> embedded_hal_async::spi::SpiBusRead<W>
+        for Spi<'d, T, Tx, Rx>
+    {
+        async fn read(&mut self, words: &mut [W]) -> Result<(), Self::Error> {
+            self.read(words).await
+        }
+    }
+
+    impl<'d, T: Instance, Tx: TxDma<T>, Rx: RxDma<T>, W: Word> embedded_hal_async::spi::SpiBus<W> for Spi<'d, T, Tx, Rx> {
+        async fn transfer<'a>(&'a mut self, read: &'a mut [W], write: &'a [W]) -> Result<(), Self::Error> {
+            self.transfer(read, write).await
         }
 
-        impl<'d, T: Instance, Tx: TxDma<T>, Rx, W: Word> embedded_hal_async::spi::SpiBusWrite<W>
-            for Spi<'d, T, Tx, Rx>
-        {
-            type WriteFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn write<'a>(&'a mut self, data: &'a [W]) -> Self::WriteFuture<'a> {
-                self.write(data)
-            }
-        }
-
-        impl<'d, T: Instance, Tx: TxDma<T>, Rx: RxDma<T>, W: Word> embedded_hal_async::spi::SpiBusRead<W>
-            for Spi<'d, T, Tx, Rx>
-        {
-            type ReadFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn read<'a>(&'a mut self, data: &'a mut [W]) -> Self::ReadFuture<'a> {
-                self.read(data)
-            }
-        }
-
-        impl<'d, T: Instance, Tx: TxDma<T>, Rx: RxDma<T>, W: Word> embedded_hal_async::spi::SpiBus<W>
-            for Spi<'d, T, Tx, Rx>
-        {
-            type TransferFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn transfer<'a>(&'a mut self, rx: &'a mut [W], tx: &'a [W]) -> Self::TransferFuture<'a> {
-                self.transfer(rx, tx)
-            }
-
-            type TransferInPlaceFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn transfer_in_place<'a>(
-                &'a mut self,
-                words: &'a mut [W],
-            ) -> Self::TransferInPlaceFuture<'a> {
-                self.transfer_in_place(words)
-            }
+        async fn transfer_in_place<'a>(&'a mut self, words: &'a mut [W]) -> Result<(), Self::Error> {
+            self.transfer_in_place(words).await
         }
     }
 }
@@ -1040,7 +985,7 @@ pub trait Word: Copy + 'static + sealed::Word + Default + crate::dma::Word {}
 impl Word for u8 {}
 impl Word for u16 {}
 
-pub trait Instance: sealed::Instance + RccPeripheral {}
+pub trait Instance: Peripheral<P = Self> + sealed::Instance + RccPeripheral {}
 pin_trait!(SckPin, Instance);
 pin_trait!(MosiPin, Instance);
 pin_trait!(MisoPin, Instance);
@@ -1056,3 +1001,10 @@ foreach_peripheral!(
         impl Instance for peripherals::$inst {}
     };
 );
+
+impl<'d, T: Instance, Tx, Rx> SetConfig for Spi<'d, T, Tx, Rx> {
+    type Config = Config;
+    fn set_config(&mut self, config: &Self::Config) {
+        self.reconfigure(*config);
+    }
+}

@@ -4,15 +4,15 @@
 mod serial_port;
 
 use async_io::Async;
-use embassy::executor::Executor;
-use embassy::util::Forever;
+use embassy_executor::Executor;
 use embedded_io::asynch::Read;
 use log::*;
 use nix::sys::termios;
+use static_cell::StaticCell;
 
 use self::serial_port::SerialPort;
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn run() {
     // Open the serial port.
     let baudrate = termios::BaudRate::B115200;
@@ -40,7 +40,7 @@ async fn run() {
     }
 }
 
-static EXECUTOR: Forever<Executor> = Forever::new();
+static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
 fn main() {
     env_logger::builder()
@@ -49,7 +49,7 @@ fn main() {
         .format_timestamp_nanos()
         .init();
 
-    let executor = EXECUTOR.put(Executor::new());
+    let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         spawner.spawn(run()).unwrap();
     });

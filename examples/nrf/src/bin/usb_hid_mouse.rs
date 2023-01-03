@@ -1,41 +1,34 @@
 #![no_std]
 #![no_main]
-#![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 
 use core::mem;
+
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
-use embassy_nrf::interrupt;
-use embassy_nrf::pac;
-use embassy_nrf::usb::Driver;
-use embassy_nrf::Peripherals;
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_nrf::usb::{Driver, PowerUsb};
+use embassy_nrf::{interrupt, pac};
+use embassy_time::{Duration, Timer};
+use embassy_usb::class::hid::{HidWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config};
-use embassy_usb_hid::{HidWriter, ReportId, RequestHandler, State};
-use futures::future::join;
 use usbd_hid::descriptor::{MouseReport, SerializedDescriptor};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let clock: pac::CLOCK = unsafe { mem::transmute(()) };
-    let power: pac::POWER = unsafe { mem::transmute(()) };
 
     info!("Enabling ext hfosc...");
     clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
     while clock.events_hfclkstarted.read().bits() != 1 {}
 
-    info!("Waiting for vbus...");
-    while !power.usbregstatus.read().vbusdetect().is_vbus_present() {}
-    info!("vbus OK");
-
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
-    let driver = Driver::new(p.USBD, irq);
+    let power_irq = interrupt::take!(POWER_CLOCK);
+    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -66,7 +59,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     );
 
     // Create classes on the builder.
-    let config = embassy_usb_hid::Config {
+    let config = embassy_usb::class::hid::Config {
         report_descriptor: MouseReport::desc(),
         request_handler: Some(&request_handler),
         poll_ms: 60,
@@ -120,11 +113,11 @@ impl RequestHandler for MyRequestHandler {
         OutResponse::Accepted
     }
 
-    fn set_idle(&self, id: Option<ReportId>, dur: Duration) {
+    fn set_idle_ms(&self, id: Option<ReportId>, dur: u32) {
         info!("Set idle rate for {:?} to {:?}", id, dur);
     }
 
-    fn get_idle(&self, id: Option<ReportId>) -> Option<Duration> {
+    fn get_idle_ms(&self, id: Option<ReportId>) -> Option<u32> {
         info!("Get idle rate for {:?}", id);
         None
     }

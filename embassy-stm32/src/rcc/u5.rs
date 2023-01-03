@@ -1,10 +1,14 @@
-use crate::pac::{FLASH, RCC};
-use crate::rcc::{set_freqs, Clocks};
-use crate::time::{Hertz, U32Ext};
 use stm32_metapac::rcc::vals::{Hpre, Msirange, Msirgsel, Pllm, Pllsrc, Ppre, Sw};
 
-/// HSI16 speed
-pub const HSI16_FREQ: u32 = 16_000_000;
+use crate::pac::{FLASH, RCC};
+use crate::rcc::{set_freqs, Clocks};
+use crate::time::Hertz;
+
+/// HSI speed
+pub const HSI_FREQ: Hertz = Hertz(16_000_000);
+
+/// LSI speed
+pub const LSI_FREQ: Hertz = Hertz(32_000);
 
 /// Voltage Scale
 ///
@@ -50,7 +54,7 @@ seq_macro::seq!(N in 2..=128 {
     pub enum PllClkDiv {
         NotDivided,
         #(
-            Div#N = (N-1),
+            Div~N = (N-1),
         )*
     }
 
@@ -59,7 +63,7 @@ seq_macro::seq!(N in 2..=128 {
             match self {
                 PllClkDiv::NotDivided => 1,
                 #(
-                    PllClkDiv::Div#N => (N + 1),
+                    PllClkDiv::Div~N => N + 1,
                 )*
             }
         }
@@ -77,7 +81,7 @@ seq_macro::seq!(N in 4..=512 {
     pub enum PllN {
         NotMultiplied,
         #(
-            Mul#N = (N-1),
+            Mul~N = N-1,
         )*
     }
 
@@ -86,7 +90,7 @@ seq_macro::seq!(N in 4..=512 {
             match self {
                 PllN::NotMultiplied => 1,
                 #(
-                    PllN::Mul#N => (N + 1),
+                    PllN::Mul~N => N + 1,
                 )*
             }
         }
@@ -332,13 +336,13 @@ pub(crate) unsafe fn init(config: Config) {
             RCC.cr().write(|w| w.set_hsion(true));
             while !RCC.cr().read().hsirdy() {}
 
-            HSI16_FREQ
+            HSI_FREQ.0
         }
         ClockSrc::PLL1R(src, m, n, div) => {
             let freq = match src {
                 PllSrc::MSI(_) => MSIRange::default().into(),
                 PllSrc::HSE(hertz) => hertz.0,
-                PllSrc::HSI16 => HSI16_FREQ,
+                PllSrc::HSI16 => HSI_FREQ.0,
             };
 
             // disable
@@ -479,14 +483,14 @@ pub(crate) unsafe fn init(config: Config) {
     };
 
     set_freqs(Clocks {
-        sys: sys_clk.hz(),
-        ahb1: ahb_freq.hz(),
-        ahb2: ahb_freq.hz(),
-        ahb3: ahb_freq.hz(),
-        apb1: apb1_freq.hz(),
-        apb2: apb2_freq.hz(),
-        apb3: apb3_freq.hz(),
-        apb1_tim: apb1_tim_freq.hz(),
-        apb2_tim: apb2_tim_freq.hz(),
+        sys: Hertz(sys_clk),
+        ahb1: Hertz(ahb_freq),
+        ahb2: Hertz(ahb_freq),
+        ahb3: Hertz(ahb_freq),
+        apb1: Hertz(apb1_freq),
+        apb2: Hertz(apb2_freq),
+        apb3: Hertz(apb3_freq),
+        apb1_tim: Hertz(apb1_tim_freq),
+        apb2_tim: Hertz(apb2_tim_freq),
     });
 }

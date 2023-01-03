@@ -3,14 +3,11 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::{info, unwrap};
-use embassy::executor::Spawner;
+use embassy_executor::Spawner;
 use embassy_nrf::gpio::{AnyPin, Input, Pin as _, Pull};
-use embassy_nrf::Peripherals;
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::task(pool_size = 4)]
+#[embassy_executor::task(pool_size = 4)]
 async fn button_task(n: usize, mut pin: Input<'static, AnyPin>) {
     loop {
         pin.wait_for_low().await;
@@ -20,8 +17,9 @@ async fn button_task(n: usize, mut pin: Input<'static, AnyPin>) {
     }
 }
 
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     info!("Starting!");
 
     let btn1 = Input::new(p.P0_11.degrade(), Pull::Up);

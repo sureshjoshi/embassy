@@ -8,22 +8,20 @@ macro_rules! peripherals {
                 pub struct $name { _private: () }
 
                 $(#[$cfg])?
-                impl embassy::util::Steal for $name {
+                impl $name {
+                    /// Unsafely create an instance of this peripheral out of thin air.
+                    ///
+                    /// # Safety
+                    ///
+                    /// You must ensure that you're only using one instance of this type at a time.
                     #[inline]
-                    unsafe fn steal() -> Self {
+                    pub unsafe fn steal() -> Self {
                         Self{ _private: ()}
                     }
                 }
 
                 $(#[$cfg])?
-                unsafe impl embassy::util::Unborrow for $name {
-                    type Target = $name;
-                    #[inline]
-                    unsafe fn unborrow(self) -> $name {
-                        self
-                    }
-                }
-
+                $crate::impl_peripheral!($name);
             )*
         }
 
@@ -48,82 +46,48 @@ macro_rules! peripherals {
                         panic!("init called more than once!")
                     }
                     _EMBASSY_DEVICE_PERIPHERALS = true;
-                    <Self as embassy::util::Steal>::steal()
+                    Self::steal()
                 })
             }
         }
 
-        impl embassy::util::Steal for Peripherals {
+        impl Peripherals {
+            /// Unsafely create an instance of this peripheral out of thin air.
+            ///
+            /// # Safety
+            ///
+            /// You must ensure that you're only using one instance of this type at a time.
             #[inline]
-            unsafe fn steal() -> Self {
+            pub unsafe fn steal() -> Self {
                 Self {
                     $(
                         $(#[$cfg])?
-                        $name: <peripherals::$name as embassy::util::Steal>::steal(),
+                        $name: peripherals::$name::steal(),
                     )*
                 }
             }
         }
-
     };
 }
 
 #[macro_export]
-macro_rules! unborrow {
+macro_rules! into_ref {
     ($($name:ident),*) => {
         $(
-            let mut $name = unsafe { $name.unborrow() };
+            let mut $name = $name.into_ref();
         )*
     }
 }
 
 #[macro_export]
-macro_rules! unsafe_impl_unborrow {
+macro_rules! impl_peripheral {
     ($type:ident) => {
-        unsafe impl ::embassy::util::Unborrow for $type {
-            type Target = $type;
+        impl $crate::Peripheral for $type {
+            type P = $type;
+
             #[inline]
-            unsafe fn unborrow(self) -> Self::Target {
-                self
-            }
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! std_peripherals {
-    ($($(#[$cfg:meta])? $name:ident),*$(,)?) => {
-        #[doc = r"All the peripherals"]
-        #[allow(non_snake_case)]
-        pub struct Peripherals {
-            $(
-                $(#[$cfg])?
-                pub $name: pac::$name,
-            )+
-        }
-
-        static mut GLOBAL_CLOCKS: Option<Clocks> = None;
-
-        impl Peripherals {
-            pub fn take() -> Option<(Peripherals, Clocks)> {
-                match unsafe {GLOBAL_CLOCKS.take()} {
-                    Some(clocks) => {
-                        let dp = unsafe { pac::Peripherals::steal() };
-                        let peripherals = Peripherals {
-                            $(
-                                $(#[$cfg])?
-                                $name: dp.$name,
-                            )+
-                        };
-
-                        Some((peripherals, clocks))
-                    },
-                    None => None,
-                }
-            }
-
-            pub unsafe fn set_peripherals(clocks: Clocks) {
-                GLOBAL_CLOCKS.replace(clocks);
+            unsafe fn clone_unchecked(&mut self) -> Self::P {
+                $type { ..*self }
             }
         }
     };

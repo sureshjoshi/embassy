@@ -1,39 +1,32 @@
 #![no_std]
 #![no_main]
-#![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 
 use core::mem;
+
 use defmt::{info, panic};
-use embassy::executor::Spawner;
-use embassy_nrf::interrupt;
-use embassy_nrf::pac;
-use embassy_nrf::usb::{Driver, Instance};
-use embassy_nrf::Peripherals;
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_nrf::usb::{Driver, Instance, PowerUsb, UsbSupply};
+use embassy_nrf::{interrupt, pac};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
-use embassy_usb_serial::{CdcAcmClass, State};
-use futures::future::join;
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let clock: pac::CLOCK = unsafe { mem::transmute(()) };
-    let power: pac::POWER = unsafe { mem::transmute(()) };
 
     info!("Enabling ext hfosc...");
     clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
     while clock.events_hfclkstarted.read().bits() != 1 {}
 
-    info!("Waiting for vbus...");
-    while !power.usbregstatus.read().vbusdetect().is_vbus_present() {}
-    info!("vbus OK");
-
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
-    let driver = Driver::new(p.USBD, irq);
+    let power_irq = interrupt::take!(POWER_CLOCK);
+    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -104,8 +97,8 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-async fn echo<'d, T: Instance + 'd>(
-    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
+async fn echo<'d, T: Instance + 'd, P: UsbSupply + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
 ) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {

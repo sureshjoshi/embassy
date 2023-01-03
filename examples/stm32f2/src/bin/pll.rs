@@ -3,23 +3,21 @@
 #![feature(type_alias_impl_trait)]
 
 use core::convert::TryFrom;
+
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
-use embassy_stm32::{
-    rcc::{
-        APBPrescaler, ClockSrc, HSEConfig, HSESrc, PLL48Div, PLLConfig, PLLMainDiv, PLLMul,
-        PLLPreDiv, PLLSrc,
-    },
-    time::Hertz,
-    Config, Peripherals,
+use embassy_executor::Spawner;
+use embassy_stm32::rcc::{
+    APBPrescaler, ClockSrc, HSEConfig, HSESrc, PLL48Div, PLLConfig, PLLMainDiv, PLLMul, PLLPreDiv, PLLSrc,
 };
+use embassy_stm32::time::Hertz;
+use embassy_stm32::Config;
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    // Example config for maximum performance on a NUCLEO-F207ZG board
 
-// Example config for maximum performance on a NUCLEO-F207ZG board
-fn config() -> Config {
     let mut config = Config::default();
     // By default, HSE on the board comes from a 8 MHz clock signal (not a crystal)
     config.rcc.hse = Some(HSEConfig {
@@ -44,11 +42,9 @@ fn config() -> Config {
     config.rcc.apb1_pre = APBPrescaler::Div4;
     // 120 MHz / 2 = 60 MHz APB2 frequency
     config.rcc.apb2_pre = APBPrescaler::Div2;
-    config
-}
 
-#[embassy::main(config = "config()")]
-async fn main(_spawner: Spawner, _p: Peripherals) {
+    let _p = embassy_stm32::init(config);
+
     loop {
         Timer::after(Duration::from_millis(1000)).await;
         info!("1s elapsed");

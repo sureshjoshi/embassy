@@ -2,25 +2,17 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
 use defmt::*;
-
-use embassy::executor::Spawner;
+use embassy_executor::Spawner;
+use embassy_stm32::interrupt;
 use embassy_stm32::usart::{Config, Uart};
-use embassy_stm32::Peripherals;
+use {defmt_rtt as _, panic_probe as _};
 
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
-    let mut usart = Uart::new(
-        p.USART1,
-        p.PB7,
-        p.PB6,
-        p.DMA1_CH2,
-        p.DMA1_CH3,
-        Config::default(),
-    );
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_stm32::init(Default::default());
+    let irq = interrupt::take!(USART1);
+    let mut usart = Uart::new(p.USART1, p.PB7, p.PB6, irq, p.DMA1_CH2, p.DMA1_CH3, Config::default());
 
     usart.write(b"Hello Embassy World!\r\n").await.unwrap();
     info!("wrote Hello, starting echo");

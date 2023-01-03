@@ -44,17 +44,18 @@ impl From<RampTime> for core::time::Duration {
     }
 }
 
-impl From<RampTime> for embassy::time::Duration {
+#[cfg(feature = "time")]
+impl From<RampTime> for embassy_time::Duration {
     fn from(rt: RampTime) -> Self {
         match rt {
-            RampTime::Micros10 => embassy::time::Duration::from_micros(10),
-            RampTime::Micros20 => embassy::time::Duration::from_micros(20),
-            RampTime::Micros40 => embassy::time::Duration::from_micros(40),
-            RampTime::Micros80 => embassy::time::Duration::from_micros(80),
-            RampTime::Micros200 => embassy::time::Duration::from_micros(200),
-            RampTime::Micros800 => embassy::time::Duration::from_micros(800),
-            RampTime::Micros1700 => embassy::time::Duration::from_micros(1700),
-            RampTime::Micros3400 => embassy::time::Duration::from_micros(3400),
+            RampTime::Micros10 => embassy_time::Duration::from_micros(10),
+            RampTime::Micros20 => embassy_time::Duration::from_micros(20),
+            RampTime::Micros40 => embassy_time::Duration::from_micros(40),
+            RampTime::Micros80 => embassy_time::Duration::from_micros(80),
+            RampTime::Micros200 => embassy_time::Duration::from_micros(200),
+            RampTime::Micros800 => embassy_time::Duration::from_micros(800),
+            RampTime::Micros1700 => embassy_time::Duration::from_micros(1700),
+            RampTime::Micros3400 => embassy_time::Duration::from_micros(3400),
         }
     }
 }
@@ -100,7 +101,7 @@ impl TxParams {
     /// # Example
     ///
     /// ```
-    /// use stm32wl_hal::subghz::TxParams;
+    /// use stm32wlxx_hal::subghz::TxParams;
     ///
     /// const TX_PARAMS: TxParams = TxParams::new();
     /// assert_eq!(TX_PARAMS, TxParams::default());
@@ -136,7 +137,7 @@ impl TxParams {
     /// Set the output power to 0 dB.
     ///
     /// ```
-    /// use stm32wl_hal::subghz::{RampTime, TxParams};
+    /// use stm32wlxx_hal::subghz::{RampTime, TxParams};
     ///
     /// const TX_PARAMS: TxParams = TxParams::new().set_power(0x00);
     /// # assert_eq!(TX_PARAMS.as_slice()[1], 0x00);
@@ -156,7 +157,7 @@ impl TxParams {
     /// Set the ramp time to 200 microseconds.
     ///
     /// ```
-    /// use stm32wl_hal::subghz::{RampTime, TxParams};
+    /// use stm32wlxx_hal::subghz::{RampTime, TxParams};
     ///
     /// const TX_PARAMS: TxParams = TxParams::new().set_ramp_time(RampTime::Micros200);
     /// # assert_eq!(TX_PARAMS.as_slice()[2], 0x04);
@@ -172,7 +173,7 @@ impl TxParams {
     /// # Example
     ///
     /// ```
-    /// use stm32wl_hal::subghz::{RampTime, TxParams};
+    /// use stm32wlxx_hal::subghz::{RampTime, TxParams};
     ///
     /// const TX_PARAMS: TxParams = TxParams::new()
     ///     .set_ramp_time(RampTime::Micros80)

@@ -2,15 +2,14 @@
 #![no_main]
 
 use core::mem;
+
 use cortex_m_rt::entry;
 use defmt::{info, unwrap};
-use embassy::executor::raw::TaskStorage;
-use embassy::executor::Executor;
-use embassy::time::{Duration, Timer};
-use embassy::util::Forever;
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use embassy_executor::raw::TaskStorage;
+use embassy_executor::Executor;
+use embassy_time::{Duration, Timer};
+use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
 async fn run1() {
     loop {
@@ -26,14 +25,14 @@ async fn run2() {
     }
 }
 
-static EXECUTOR: Forever<Executor> = Forever::new();
+static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
 #[entry]
 fn main() -> ! {
     info!("Hello World!");
 
     let _p = embassy_nrf::init(Default::default());
-    let executor = EXECUTOR.put(Executor::new());
+    let executor = EXECUTOR.init(Executor::new());
 
     let run1_task = TaskStorage::new();
     let run2_task = TaskStorage::new();

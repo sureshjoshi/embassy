@@ -3,20 +3,21 @@
 #![feature(type_alias_impl_trait)]
 
 use core::fmt::Write;
+
 use defmt::*;
-use defmt_rtt as _; // global logger
-use embassy::executor::Spawner;
+use embassy_executor::Spawner;
 use embassy_stm32::dma::NoDma;
+use embassy_stm32::interrupt;
 use embassy_stm32::usart::{Config, Uart};
-use embassy_stm32::Peripherals;
-use panic_probe as _;
-
 use heapless::String;
+use {defmt_rtt as _, panic_probe as _};
 
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_stm32::init(Default::default());
     let config = Config::default();
-    let mut usart = Uart::new(p.UART7, p.PA8, p.PA15, p.DMA1_CH1, NoDma, config);
+    let irq = interrupt::take!(UART7);
+    let mut usart = Uart::new(p.UART7, p.PA8, p.PA15, irq, p.DMA1_CH1, NoDma, config);
 
     for n in 0u32.. {
         let mut s: String<128> = String::new();

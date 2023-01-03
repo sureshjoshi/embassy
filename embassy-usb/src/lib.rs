@@ -1,30 +1,27 @@
 #![no_std]
-#![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
+pub use embassy_usb_driver as driver;
+
 mod builder;
+pub mod class;
 pub mod control;
 pub mod descriptor;
 mod descriptor_reader;
-pub mod driver;
 pub mod types;
 
-use embassy::util::{select, Either};
+use embassy_futures::select::{select, Either};
 use heapless::Vec;
 
+pub use crate::builder::{Builder, Config};
+use crate::control::*;
+use crate::descriptor::*;
 use crate::descriptor_reader::foreach_endpoint;
-use crate::driver::ControlPipe;
-
-use self::control::*;
-use self::descriptor::*;
-use self::driver::{Bus, Driver, Event};
-use self::types::*;
-
-pub use self::builder::Builder;
-pub use self::builder::Config;
+use crate::driver::{Bus, ControlPipe, Direction, Driver, EndpointAddress, Event};
+use crate::types::*;
 
 /// The global state of the USB device.
 ///
@@ -33,6 +30,9 @@ pub use self::builder::Config;
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum UsbDeviceState {
+    /// The USB device has no power.
+    Unpowered,
+
     /// The USB device is disabled.
     Disabled,
 
@@ -157,7 +157,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
                 config_descriptor,
                 bos_descriptor,
 
-                device_state: UsbDeviceState::Disabled,
+                device_state: UsbDeviceState::Unpowered,
                 suspended: false,
                 remote_wakeup_enabled: false,
                 self_powered: false,
@@ -188,20 +188,11 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
     /// before calling any other `UsbDevice` methods to fully reset the
     /// peripheral.
     pub async fn run_until_suspend(&mut self) -> () {
-        if self.inner.device_state == UsbDeviceState::Disabled {
-            self.inner.bus.enable().await;
-            self.inner.device_state = UsbDeviceState::Default;
-
-            if let Some(h) = &self.inner.handler {
-                h.enabled(true);
-            }
-        }
-
         while !self.inner.suspended {
             let control_fut = self.control.setup();
             let bus_fut = self.inner.bus.poll();
             match select(bus_fut, control_fut).await {
-                Either::First(evt) => self.inner.handle_bus_event(evt),
+                Either::First(evt) => self.inner.handle_bus_event(evt).await,
                 Either::Second(req) => self.handle_control(req).await,
             }
         }
@@ -227,7 +218,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
     pub async fn wait_resume(&mut self) {
         while self.inner.suspended {
             let evt = self.inner.bus.poll().await;
-            self.inner.handle_bus_event(evt);
+            self.inner.handle_bus_event(evt).await;
         }
     }
 
@@ -257,11 +248,11 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
     async fn handle_control(&mut self, req: [u8; 8]) {
         let req = Request::parse(&req);
 
-        trace!("control request: {:02x}", req);
+        trace!("control request: {:?}", req);
 
         match req.direction {
-            UsbDirection::In => self.handle_control_in(req).await,
-            UsbDirection::Out => self.handle_control_out(req).await,
+            Direction::In => self.handle_control_in(req).await,
+            Direction::Out => self.handle_control_out(req).await,
         }
 
         if self.inner.set_address_pending {
@@ -344,7 +335,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
 }
 
 impl<'d, D: Driver<'d>> Inner<'d, D> {
-    fn handle_bus_event(&mut self, evt: Event) {
+    async fn handle_bus_event(&mut self, evt: Event) {
         match evt {
             Event::Reset => {
                 trace!("usb: reset");
@@ -377,6 +368,24 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                 self.suspended = true;
                 if let Some(h) = &self.handler {
                     h.suspended(true);
+                }
+            }
+            Event::PowerDetected => {
+                trace!("usb: power detected");
+                self.bus.enable().await;
+                self.device_state = UsbDeviceState::Default;
+
+                if let Some(h) = &self.handler {
+                    h.enabled(true);
+                }
+            }
+            Event::PowerRemoved => {
+                trace!("usb: power removed");
+                self.bus.disable().await;
+                self.device_state = UsbDeviceState::Unpowered;
+
+                if let Some(h) = &self.handler {
+                    h.enabled(false);
                 }
             }
         }
@@ -418,10 +427,8 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                     // Enable all endpoints of selected alt settings.
                     foreach_endpoint(self.config_descriptor, |ep| {
                         let iface = &self.interfaces[ep.interface as usize];
-                        self.bus.endpoint_set_enabled(
-                            ep.ep_address,
-                            iface.current_alt_setting == ep.interface_alt,
-                        );
+                        self.bus
+                            .endpoint_set_enabled(ep.ep_address, iface.current_alt_setting == ep.interface_alt);
                     })
                     .unwrap();
 
@@ -474,10 +481,8 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                         // Enable/disable EPs of this interface as needed.
                         foreach_endpoint(self.config_descriptor, |ep| {
                             if ep.interface == req.index as u8 {
-                                self.bus.endpoint_set_enabled(
-                                    ep.ep_address,
-                                    iface.current_alt_setting == ep.interface_alt,
-                                );
+                                self.bus
+                                    .endpoint_set_enabled(ep.ep_address, iface.current_alt_setting == ep.interface_alt);
                             }
                         })
                         .unwrap();

@@ -1,6 +1,6 @@
-= Embassy runtime
+= Embassy executor
 
-The Embassy runtime is an async/await executor designed for embedded usage along with support functionality for interrupts and timers.
+The Embassy executor is an async/await executor designed for embedded usage along with support functionality for interrupts and timers.
 
 == Features
 
@@ -20,7 +20,7 @@ IMPORTANT: The executor relies on tasks not blocking indefinitely, as this preve
 
 image::embassy_executor.png[Executor model]
 
-If you use the `#[embassy::main]` macro in your application, it creates the `Executor` for you and spawns the main entry point as the first task. You can also create the Executor manually, and you can in fact create multiple Executors.
+If you use the `#[embassy_executor::main]` macro in your application, it creates the `Executor` for you and spawns the main entry point as the first task. You can also create the Executor manually, and you can in fact create multiple Executors.
 
 
 == Interrupts

@@ -1,4 +1,5 @@
-use crate::{peripherals, rcc::RccPeripheral};
+use crate::peripherals;
+use crate::rcc::RccPeripheral;
 
 #[cfg(feature = "nightly")]
 mod usb;

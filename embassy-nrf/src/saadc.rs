@@ -1,29 +1,24 @@
 #![macro_use]
 
-use core::marker::PhantomData;
+use core::future::poll_fn;
 use core::sync::atomic::{compiler_fence, Ordering};
 use core::task::Poll;
-use embassy::interrupt::InterruptExt;
-use embassy::util::Unborrow;
-use embassy::waitqueue::AtomicWaker;
-use embassy_hal_common::unborrow;
-use futures::future::poll_fn;
 
-use crate::interrupt;
-use crate::ppi::{ConfigurableChannel, Event, Ppi, Task};
-use crate::timer::{Frequency, Instance as TimerInstance, Timer};
-use crate::{pac, peripherals};
-
+use embassy_hal_common::drop::OnDrop;
+use embassy_hal_common::{impl_peripheral, into_ref, PeripheralRef};
+use embassy_sync::waitqueue::AtomicWaker;
 use pac::{saadc, SAADC};
-
+use saadc::ch::config::{GAIN_A, REFSEL_A, RESP_A, TACQ_A};
 // We treat the positive and negative channels with the same enum values to keep our type tidy and given they are the same
 pub(crate) use saadc::ch::pselp::PSELP_A as InputChannel;
+use saadc::oversample::OVERSAMPLE_A;
+use saadc::resolution::VAL_A;
 
-use saadc::{
-    ch::config::{GAIN_A, REFSEL_A, RESP_A, TACQ_A},
-    oversample::OVERSAMPLE_A,
-    resolution::VAL_A,
-};
+use self::sealed::Input as _;
+use crate::interrupt::InterruptExt;
+use crate::ppi::{ConfigurableChannel, Event, Ppi, Task};
+use crate::timer::{Frequency, Instance as TimerInstance, Timer};
+use crate::{interrupt, pac, peripherals, Peripheral};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -32,7 +27,7 @@ pub enum Error {}
 
 /// One-shot and continuous SAADC.
 pub struct Saadc<'d, const N: usize> {
-    phantom: PhantomData<&'d mut peripherals::SAADC>,
+    _p: PeripheralRef<'d, peripherals::SAADC>,
 }
 
 static WAKER: AtomicWaker = AtomicWaker::new();
@@ -72,87 +67,37 @@ pub struct ChannelConfig<'d> {
     /// Acquisition time in microseconds.
     pub time: Time,
     /// Positive channel to sample
-    p_channel: InputChannel,
+    p_channel: PeripheralRef<'d, AnyInput>,
     /// An optional negative channel to sample
-    n_channel: Option<InputChannel>,
-
-    phantom: PhantomData<&'d ()>,
+    n_channel: Option<PeripheralRef<'d, AnyInput>>,
 }
-
-/// A dummy `Input` pin implementation for SAADC peripheral sampling from the
-/// internal voltage.
-pub struct VddInput;
-
-unsafe impl Unborrow for VddInput {
-    type Target = VddInput;
-    unsafe fn unborrow(self) -> Self::Target {
-        self
-    }
-}
-
-impl sealed::Input for VddInput {
-    #[cfg(not(feature = "_nrf9160"))]
-    fn channel(&self) -> InputChannel {
-        InputChannel::VDD
-    }
-    #[cfg(feature = "_nrf9160")]
-    fn channel(&self) -> InputChannel {
-        InputChannel::VDDGPIO
-    }
-}
-impl Input for VddInput {}
-
-/// A dummy `Input` pin implementation for SAADC peripheral sampling from the
-/// VDDH / 5 voltage.
-#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
-pub struct VddhDiv5Input;
-
-#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
-unsafe impl Unborrow for VddhDiv5Input {
-    type Target = VddhDiv5Input;
-    unsafe fn unborrow(self) -> Self::Target {
-        self
-    }
-}
-
-#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
-impl sealed::Input for VddhDiv5Input {
-    fn channel(&self) -> InputChannel {
-        InputChannel::VDDHDIV5
-    }
-}
-
-#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
-impl Input for VddhDiv5Input {}
 
 impl<'d> ChannelConfig<'d> {
     /// Default configuration for single ended channel sampling.
-    pub fn single_ended(input: impl Unborrow<Target = impl Input> + 'd) -> Self {
-        unborrow!(input);
+    pub fn single_ended(input: impl Peripheral<P = impl Input> + 'd) -> Self {
+        into_ref!(input);
         Self {
             reference: Reference::INTERNAL,
             gain: Gain::GAIN1_6,
             resistor: Resistor::BYPASS,
             time: Time::_10US,
-            p_channel: input.channel(),
+            p_channel: input.map_into(),
             n_channel: None,
-            phantom: PhantomData,
         }
     }
     /// Default configuration for differential channel sampling.
     pub fn differential(
-        p_input: impl Unborrow<Target = impl Input> + 'd,
-        n_input: impl Unborrow<Target = impl Input> + 'd,
+        p_input: impl Peripheral<P = impl Input> + 'd,
+        n_input: impl Peripheral<P = impl Input> + 'd,
     ) -> Self {
-        unborrow!(p_input, n_input);
+        into_ref!(p_input, n_input);
         Self {
             reference: Reference::INTERNAL,
             gain: Gain::GAIN1_6,
             resistor: Resistor::BYPASS,
             time: Time::_10US,
-            p_channel: p_input.channel(),
-            n_channel: Some(n_input.channel()),
-            phantom: PhantomData,
+            p_channel: p_input.map_into(),
+            n_channel: Some(n_input.map_into()),
         }
     }
 }
@@ -169,32 +114,28 @@ pub enum SamplerState {
 
 impl<'d, const N: usize> Saadc<'d, N> {
     pub fn new(
-        _saadc: impl Unborrow<Target = peripherals::SAADC> + 'd,
-        irq: impl Unborrow<Target = interrupt::SAADC> + 'd,
+        saadc: impl Peripheral<P = peripherals::SAADC> + 'd,
+        irq: impl Peripheral<P = interrupt::SAADC> + 'd,
         config: Config,
         channel_configs: [ChannelConfig; N],
     ) -> Self {
-        unborrow!(irq);
+        into_ref!(saadc, irq);
 
         let r = unsafe { &*SAADC::ptr() };
 
-        let Config {
-            resolution,
-            oversample,
-        } = config;
+        let Config { resolution, oversample } = config;
 
         // Configure channels
         r.enable.write(|w| w.enable().enabled());
         r.resolution.write(|w| w.val().variant(resolution.into()));
-        r.oversample
-            .write(|w| w.oversample().variant(oversample.into()));
+        r.oversample.write(|w| w.oversample().variant(oversample.into()));
 
         for (i, cc) in channel_configs.iter().enumerate() {
-            r.ch[i].pselp.write(|w| w.pselp().variant(cc.p_channel));
-            if let Some(n_channel) = cc.n_channel {
+            r.ch[i].pselp.write(|w| w.pselp().variant(cc.p_channel.channel()));
+            if let Some(n_channel) = &cc.n_channel {
                 r.ch[i]
                     .pseln
-                    .write(|w| unsafe { w.pseln().bits(n_channel as u8) });
+                    .write(|w| unsafe { w.pseln().bits(n_channel.channel() as u8) });
             }
             r.ch[i].config.write(|w| {
                 w.refsel().variant(cc.reference.into());
@@ -223,9 +164,7 @@ impl<'d, const N: usize> Saadc<'d, N> {
         irq.unpend();
         irq.enable();
 
-        Self {
-            phantom: PhantomData,
-        }
+        Self { _p: saadc }
     }
 
     fn on_interrupt(_ctx: *mut ()) {
@@ -281,16 +220,18 @@ impl<'d, const N: usize> Saadc<'d, N> {
     }
 
     /// One shot sampling. The buffer must be the same size as the number of channels configured.
+    /// The sampling is stopped prior to returning in order to reduce power consumption (power
+    /// consumption remains higher if sampling is not stopped explicitly). Cancellation will
+    /// also cause the sampling to be stopped.
     pub async fn sample(&mut self, buf: &mut [i16; N]) {
+        // In case the future is dropped, stop the task and wait for it to end.
+        OnDrop::new(Self::stop_sampling_immediately);
+
         let r = Self::regs();
 
         // Set up the DMA
-        r.result
-            .ptr
-            .write(|w| unsafe { w.ptr().bits(buf.as_mut_ptr() as u32) });
-        r.result
-            .maxcnt
-            .write(|w| unsafe { w.maxcnt().bits(N as _) });
+        r.result.ptr.write(|w| unsafe { w.ptr().bits(buf.as_mut_ptr() as u32) });
+        r.result.maxcnt.write(|w| unsafe { w.maxcnt().bits(N as _) });
 
         // Reset and enable the end event
         r.events_end.reset();
@@ -336,6 +277,12 @@ impl<'d, const N: usize> Saadc<'d, N> {
     /// taken to acquire the samples into a single buffer. You should measure the
     /// time taken by the callback and set the sample buffer size accordingly.
     /// Exceeding this time can lead to samples becoming dropped.
+    ///
+    /// The sampling is stopped prior to returning in order to reduce power consumption (power
+    /// consumption remains higher if sampling is not stopped explicitly), and to
+    /// free the buffers from being used by the peripheral. Cancellation will
+    /// also cause the sampling to be stopped.
+
     pub async fn run_task_sampler<S, T: TimerInstance, const N0: usize>(
         &mut self,
         timer: &mut T,
@@ -353,11 +300,8 @@ impl<'d, const N: usize> Saadc<'d, N> {
         // We want the task start to effectively short with the last one ending so
         // we don't miss any samples. It'd be great for the SAADC to offer a SHORTS
         // register instead, but it doesn't, so we must use PPI.
-        let mut start_ppi = Ppi::new_one_to_one(
-            ppi_ch1,
-            Event::from_reg(&r.events_end),
-            Task::from_reg(&r.tasks_start),
-        );
+        let mut start_ppi =
+            Ppi::new_one_to_one(ppi_ch1, Event::from_reg(&r.events_end), Task::from_reg(&r.tasks_start));
         start_ppi.enable();
 
         let mut timer = Timer::new(timer);
@@ -365,11 +309,7 @@ impl<'d, const N: usize> Saadc<'d, N> {
         timer.cc(0).write(sample_counter);
         timer.cc(0).short_compare_clear();
 
-        let mut sample_ppi = Ppi::new_one_to_one(
-            ppi_ch2,
-            timer.cc(0).event_compare(),
-            Task::from_reg(&r.tasks_sample),
-        );
+        let mut sample_ppi = Ppi::new_one_to_one(ppi_ch2, timer.cc(0).event_compare(), Task::from_reg(&r.tasks_sample));
 
         timer.start();
 
@@ -394,6 +334,9 @@ impl<'d, const N: usize> Saadc<'d, N> {
         I: FnMut(),
         S: FnMut(&[[i16; N]]) -> SamplerState,
     {
+        // In case the future is dropped, stop the task and wait for it to end.
+        OnDrop::new(Self::stop_sampling_immediately);
+
         let r = Self::regs();
 
         // Establish mode and sample rate
@@ -417,9 +360,7 @@ impl<'d, const N: usize> Saadc<'d, N> {
         r.result
             .ptr
             .write(|w| unsafe { w.ptr().bits(bufs[0].as_mut_ptr() as u32) });
-        r.result
-            .maxcnt
-            .write(|w| unsafe { w.maxcnt().bits((N0 * N) as _) });
+        r.result.maxcnt.write(|w| unsafe { w.maxcnt().bits((N0 * N) as _) });
 
         // Reset and enable the events
         r.events_end.reset();
@@ -479,6 +420,19 @@ impl<'d, const N: usize> Saadc<'d, N> {
         })
         .await;
     }
+
+    // Stop sampling and wait for it to stop in a blocking fashion
+    fn stop_sampling_immediately() {
+        let r = Self::regs();
+
+        compiler_fence(Ordering::SeqCst);
+
+        r.events_stopped.reset();
+        r.tasks_stop.write(|w| unsafe { w.bits(1) });
+
+        while r.events_stopped.read().bits() == 0 {}
+        r.events_stopped.reset();
+    }
 }
 
 impl<'d> Saadc<'d, 1> {
@@ -500,8 +454,7 @@ impl<'d> Saadc<'d, 1> {
     ) where
         S: FnMut(&[[i16; 1]]) -> SamplerState,
     {
-        self.run_sampler(bufs, Some(sample_rate_divisor), || {}, sampler)
-            .await;
+        self.run_sampler(bufs, Some(sample_rate_divisor), || {}, sampler).await;
     }
 }
 
@@ -698,15 +651,65 @@ pub(crate) mod sealed {
 }
 
 /// An input that can be used as either or negative end of a ADC differential in the SAADC periperhal.
-pub trait Input: sealed::Input + Unborrow<Target = Self> {}
+pub trait Input: sealed::Input + Into<AnyInput> + Peripheral<P = Self> + Sized + 'static {
+    fn degrade_saadc(self) -> AnyInput {
+        AnyInput {
+            channel: self.channel(),
+        }
+    }
+}
+
+pub struct AnyInput {
+    channel: InputChannel,
+}
+
+impl_peripheral!(AnyInput);
+
+impl sealed::Input for AnyInput {
+    fn channel(&self) -> InputChannel {
+        self.channel
+    }
+}
+
+impl Input for AnyInput {}
 
 macro_rules! impl_saadc_input {
     ($pin:ident, $ch:ident) => {
-        impl crate::saadc::sealed::Input for crate::peripherals::$pin {
+        impl_saadc_input!(@local, crate::peripherals::$pin, $ch);
+    };
+    (@local, $pin:ty, $ch:ident) => {
+        impl crate::saadc::sealed::Input for $pin {
             fn channel(&self) -> crate::saadc::InputChannel {
                 crate::saadc::InputChannel::$ch
             }
         }
-        impl crate::saadc::Input for crate::peripherals::$pin {}
+        impl crate::saadc::Input for $pin {}
+
+        impl From<$pin> for crate::saadc::AnyInput {
+            fn from(val: $pin) -> Self {
+                crate::saadc::Input::degrade_saadc(val)
+            }
+        }
     };
 }
+
+/// A dummy `Input` pin implementation for SAADC peripheral sampling from the
+/// internal voltage.
+pub struct VddInput;
+
+impl_peripheral!(VddInput);
+#[cfg(not(feature = "_nrf9160"))]
+impl_saadc_input!(@local, VddInput, VDD);
+#[cfg(feature = "_nrf9160")]
+impl_saadc_input!(@local, VddInput, VDDGPIO);
+
+/// A dummy `Input` pin implementation for SAADC peripheral sampling from the
+/// VDDH / 5 voltage.
+#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
+pub struct VddhDiv5Input;
+
+#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
+impl_peripheral!(VddhDiv5Input);
+
+#[cfg(any(feature = "_nrf5340-app", feature = "nrf52833", feature = "nrf52840"))]
+impl_saadc_input!(@local, VddhDiv5Input, VDDHDIV5);

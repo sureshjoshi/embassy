@@ -1,13 +1,13 @@
-use core::marker::PhantomData;
+use core::future::poll_fn;
 use core::task::Poll;
 
-use embassy::interrupt::{Interrupt, InterruptExt};
-use embassy::util::Unborrow;
-use embassy::waitqueue::AtomicWaker;
-use embassy_hal_common::unborrow;
-use futures::future::poll_fn;
+use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_sync::waitqueue::AtomicWaker;
 
-use crate::gpio::{sealed::AFType, Speed};
+use crate::gpio::sealed::AFType;
+use crate::gpio::Speed;
+use crate::interrupt::{Interrupt, InterruptExt};
+use crate::Peripheral;
 
 /// The level on the VSync pin when the data is not valid on the parallel interface.
 #[derive(Clone, Copy, PartialEq)]
@@ -69,7 +69,7 @@ impl Default for Config {
 
 macro_rules! config_pins {
     ($($pin:ident),*) => {
-        unborrow!($($pin),*);
+        into_ref!($($pin),*);
         // NOTE(unsafe) Exclusive access to the registers
         critical_section::with(|_| unsafe {
             $(
@@ -81,9 +81,8 @@ macro_rules! config_pins {
 }
 
 pub struct Dcmi<'d, T: Instance, Dma: FrameDma<T>> {
-    inner: T,
-    dma: Dma,
-    phantom: PhantomData<&'d mut T>,
+    inner: PeripheralRef<'d, T>,
+    dma: PeripheralRef<'d, Dma>,
 }
 
 impl<'d, T, Dma> Dcmi<'d, T, Dma>
@@ -92,23 +91,23 @@ where
     Dma: FrameDma<T>,
 {
     pub fn new_8bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        v_sync: impl Unborrow<Target = impl VSyncPin<T>> + 'd,
-        h_sync: impl Unborrow<Target = impl HSyncPin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        v_sync: impl Peripheral<P = impl VSyncPin<T>> + 'd,
+        h_sync: impl Peripheral<P = impl HSyncPin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7);
         config_pins!(v_sync, h_sync, pixclk);
 
@@ -116,25 +115,25 @@ where
     }
 
     pub fn new_10bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        d8: impl Unborrow<Target = impl D8Pin<T>> + 'd,
-        d9: impl Unborrow<Target = impl D9Pin<T>> + 'd,
-        v_sync: impl Unborrow<Target = impl VSyncPin<T>> + 'd,
-        h_sync: impl Unborrow<Target = impl HSyncPin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        d8: impl Peripheral<P = impl D8Pin<T>> + 'd,
+        d9: impl Peripheral<P = impl D9Pin<T>> + 'd,
+        v_sync: impl Peripheral<P = impl VSyncPin<T>> + 'd,
+        h_sync: impl Peripheral<P = impl HSyncPin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9);
         config_pins!(v_sync, h_sync, pixclk);
 
@@ -142,27 +141,27 @@ where
     }
 
     pub fn new_12bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        d8: impl Unborrow<Target = impl D8Pin<T>> + 'd,
-        d9: impl Unborrow<Target = impl D9Pin<T>> + 'd,
-        d10: impl Unborrow<Target = impl D10Pin<T>> + 'd,
-        d11: impl Unborrow<Target = impl D11Pin<T>> + 'd,
-        v_sync: impl Unborrow<Target = impl VSyncPin<T>> + 'd,
-        h_sync: impl Unborrow<Target = impl HSyncPin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        d8: impl Peripheral<P = impl D8Pin<T>> + 'd,
+        d9: impl Peripheral<P = impl D9Pin<T>> + 'd,
+        d10: impl Peripheral<P = impl D10Pin<T>> + 'd,
+        d11: impl Peripheral<P = impl D11Pin<T>> + 'd,
+        v_sync: impl Peripheral<P = impl VSyncPin<T>> + 'd,
+        h_sync: impl Peripheral<P = impl HSyncPin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11);
         config_pins!(v_sync, h_sync, pixclk);
 
@@ -170,29 +169,29 @@ where
     }
 
     pub fn new_14bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        d8: impl Unborrow<Target = impl D8Pin<T>> + 'd,
-        d9: impl Unborrow<Target = impl D9Pin<T>> + 'd,
-        d10: impl Unborrow<Target = impl D10Pin<T>> + 'd,
-        d11: impl Unborrow<Target = impl D11Pin<T>> + 'd,
-        d12: impl Unborrow<Target = impl D12Pin<T>> + 'd,
-        d13: impl Unborrow<Target = impl D13Pin<T>> + 'd,
-        v_sync: impl Unborrow<Target = impl VSyncPin<T>> + 'd,
-        h_sync: impl Unborrow<Target = impl HSyncPin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        d8: impl Peripheral<P = impl D8Pin<T>> + 'd,
+        d9: impl Peripheral<P = impl D9Pin<T>> + 'd,
+        d10: impl Peripheral<P = impl D10Pin<T>> + 'd,
+        d11: impl Peripheral<P = impl D11Pin<T>> + 'd,
+        d12: impl Peripheral<P = impl D12Pin<T>> + 'd,
+        d13: impl Peripheral<P = impl D13Pin<T>> + 'd,
+        v_sync: impl Peripheral<P = impl VSyncPin<T>> + 'd,
+        h_sync: impl Peripheral<P = impl HSyncPin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13);
         config_pins!(v_sync, h_sync, pixclk);
 
@@ -200,21 +199,21 @@ where
     }
 
     pub fn new_es_8bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7);
         config_pins!(pixclk);
 
@@ -222,23 +221,23 @@ where
     }
 
     pub fn new_es_10bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        d8: impl Unborrow<Target = impl D8Pin<T>> + 'd,
-        d9: impl Unborrow<Target = impl D9Pin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        d8: impl Peripheral<P = impl D8Pin<T>> + 'd,
+        d9: impl Peripheral<P = impl D9Pin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9);
         config_pins!(pixclk);
 
@@ -246,25 +245,25 @@ where
     }
 
     pub fn new_es_12bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        d8: impl Unborrow<Target = impl D8Pin<T>> + 'd,
-        d9: impl Unborrow<Target = impl D9Pin<T>> + 'd,
-        d10: impl Unborrow<Target = impl D10Pin<T>> + 'd,
-        d11: impl Unborrow<Target = impl D11Pin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        d8: impl Peripheral<P = impl D8Pin<T>> + 'd,
+        d9: impl Peripheral<P = impl D9Pin<T>> + 'd,
+        d10: impl Peripheral<P = impl D10Pin<T>> + 'd,
+        d11: impl Peripheral<P = impl D11Pin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11);
         config_pins!(pixclk);
 
@@ -272,27 +271,27 @@ where
     }
 
     pub fn new_es_14bit(
-        peri: impl Unborrow<Target = T> + 'd,
-        dma: impl Unborrow<Target = Dma> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        d0: impl Unborrow<Target = impl D0Pin<T>> + 'd,
-        d1: impl Unborrow<Target = impl D1Pin<T>> + 'd,
-        d2: impl Unborrow<Target = impl D2Pin<T>> + 'd,
-        d3: impl Unborrow<Target = impl D3Pin<T>> + 'd,
-        d4: impl Unborrow<Target = impl D4Pin<T>> + 'd,
-        d5: impl Unborrow<Target = impl D5Pin<T>> + 'd,
-        d6: impl Unborrow<Target = impl D6Pin<T>> + 'd,
-        d7: impl Unborrow<Target = impl D7Pin<T>> + 'd,
-        d8: impl Unborrow<Target = impl D8Pin<T>> + 'd,
-        d9: impl Unborrow<Target = impl D9Pin<T>> + 'd,
-        d10: impl Unborrow<Target = impl D10Pin<T>> + 'd,
-        d11: impl Unborrow<Target = impl D11Pin<T>> + 'd,
-        d12: impl Unborrow<Target = impl D12Pin<T>> + 'd,
-        d13: impl Unborrow<Target = impl D13Pin<T>> + 'd,
-        pixclk: impl Unborrow<Target = impl PixClkPin<T>> + 'd,
+        peri: impl Peripheral<P = T> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        d4: impl Peripheral<P = impl D4Pin<T>> + 'd,
+        d5: impl Peripheral<P = impl D5Pin<T>> + 'd,
+        d6: impl Peripheral<P = impl D6Pin<T>> + 'd,
+        d7: impl Peripheral<P = impl D7Pin<T>> + 'd,
+        d8: impl Peripheral<P = impl D8Pin<T>> + 'd,
+        d9: impl Peripheral<P = impl D9Pin<T>> + 'd,
+        d10: impl Peripheral<P = impl D10Pin<T>> + 'd,
+        d11: impl Peripheral<P = impl D11Pin<T>> + 'd,
+        d12: impl Peripheral<P = impl D12Pin<T>> + 'd,
+        d13: impl Peripheral<P = impl D13Pin<T>> + 'd,
+        pixclk: impl Peripheral<P = impl PixClkPin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(peri, dma, irq);
+        into_ref!(peri, dma, irq);
         config_pins!(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13);
         config_pins!(pixclk);
 
@@ -300,9 +299,9 @@ where
     }
 
     fn new_inner(
-        peri: T,
-        dma: Dma,
-        irq: T::Interrupt,
+        peri: PeripheralRef<'d, T>,
+        dma: PeripheralRef<'d, Dma>,
+        irq: PeripheralRef<'d, T::Interrupt>,
         config: Config,
         use_embedded_synchronization: bool,
         edm: u8,
@@ -326,11 +325,7 @@ where
         irq.unpend();
         irq.enable();
 
-        Self {
-            inner: peri,
-            dma,
-            phantom: PhantomData,
-        }
+        Self { inner: peri, dma }
     }
 
     unsafe fn on_interrupt(_: *mut ()) {
@@ -434,7 +429,7 @@ where
             }
         });
 
-        let (_, result) = futures::future::join(dma_read, result).await;
+        let (_, result) = embassy_futures::join::join(dma_read, result).await;
 
         unsafe { Self::toggle(false) };
 
@@ -466,14 +461,7 @@ where
         let src = r.dr().ptr() as *mut u32;
 
         unsafe {
-            channel.start_double_buffered_read(
-                request,
-                src,
-                m0ar,
-                m1ar,
-                chunk_size,
-                TransferOptions::default(),
-            );
+            channel.start_double_buffered_read(request, src, m0ar, m1ar, chunk_size, TransferOptions::default());
         }
 
         let mut last_chunk_set_for_transfer = false;
@@ -549,7 +537,7 @@ where
 
         unsafe { Self::toggle(true) };
 
-        let (_, result) = futures::future::join(dma_result, result).await;
+        let (_, result) = embassy_futures::join::join(dma_result, result).await;
 
         unsafe { Self::toggle(false) };
 

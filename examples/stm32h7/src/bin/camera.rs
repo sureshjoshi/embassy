@@ -2,42 +2,34 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
+use embassy_executor::Spawner;
 use embassy_stm32::dcmi::{self, *};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::i2c::I2c;
-use embassy_stm32::interrupt;
 use embassy_stm32::rcc::{Mco, Mco1Source, McoClock};
-use embassy_stm32::time::U32Ext;
-use embassy_stm32::Config;
-use embassy_stm32::Peripherals;
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[allow(unused)]
-pub fn config() -> Config {
-    let mut config = Config::default();
-    config.rcc.sys_ck = Some(400.mhz().into());
-    config.rcc.hclk = Some(400.mhz().into());
-    config.rcc.pll1.q_ck = Some(100.mhz().into());
-    config.rcc.pclk1 = Some(100.mhz().into());
-    config.rcc.pclk2 = Some(100.mhz().into());
-    config.rcc.pclk3 = Some(100.mhz().into());
-    config.rcc.pclk4 = Some(100.mhz().into());
-    config
-}
-
+use embassy_stm32::time::{khz, mhz};
+use embassy_stm32::{interrupt, Config};
+use embassy_time::{Duration, Timer};
 use ov7725::*;
+use {defmt_rtt as _, panic_probe as _};
 
 const WIDTH: usize = 100;
 const HEIGHT: usize = 100;
 
 static mut FRAME: [u32; WIDTH * HEIGHT / 2] = [0u32; WIDTH * HEIGHT / 2];
 
-#[embassy::main(config = "config()")]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let mut config = Config::default();
+    config.rcc.sys_ck = Some(mhz(400));
+    config.rcc.hclk = Some(mhz(400));
+    config.rcc.pll1.q_ck = Some(mhz(100));
+    config.rcc.pclk1 = Some(mhz(100));
+    config.rcc.pclk2 = Some(mhz(100));
+    config.rcc.pclk3 = Some(mhz(100));
+    config.rcc.pclk4 = Some(mhz(100));
+    let p = embassy_stm32::init(config);
+
     defmt::info!("Hello World!");
     let mco = Mco::new(p.MCO1, p.PA8, Mco1Source::Hsi, McoClock::Divided(3));
 
@@ -50,7 +42,8 @@ async fn main(_spawner: Spawner, p: Peripherals) {
         i2c_irq,
         p.DMA1_CH1,
         p.DMA1_CH2,
-        100u32.khz(),
+        khz(100),
+        Default::default(),
     );
 
     let mut camera = Ov7725::new(cam_i2c, mco);
@@ -60,17 +53,13 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     let manufacturer_id = defmt::unwrap!(camera.read_manufacturer_id().await);
     let camera_id = defmt::unwrap!(camera.read_product_id().await);
 
-    defmt::info!(
-        "manufacturer: 0x{:x}, pid: 0x{:x}",
-        manufacturer_id,
-        camera_id
-    );
+    defmt::info!("manufacturer: 0x{:x}, pid: 0x{:x}", manufacturer_id, camera_id);
 
     let dcmi_irq = interrupt::take!(DCMI);
     let config = dcmi::Config::default();
     let mut dcmi = Dcmi::new_8bit(
-        p.DCMI, p.DMA1_CH0, dcmi_irq, p.PC6, p.PC7, p.PE0, p.PE1, p.PE4, p.PD3, p.PE5, p.PE6,
-        p.PB7, p.PA4, p.PA6, config,
+        p.DCMI, p.DMA1_CH0, dcmi_irq, p.PC6, p.PC7, p.PE0, p.PE1, p.PE4, p.PD3, p.PE5, p.PE6, p.PB7, p.PA4, p.PA6,
+        config,
     );
 
     defmt::info!("attempting capture");
@@ -94,8 +83,8 @@ mod ov7725 {
     use core::marker::PhantomData;
 
     use defmt::Format;
-    use embassy::time::{Duration, Timer};
     use embassy_stm32::rcc::{Mco, McoInstance};
+    use embassy_time::{Duration, Timer};
     use embedded_hal_async::i2c::I2c;
 
     #[repr(u8)]
@@ -258,10 +247,8 @@ mod ov7725 {
             let com3 = self.read(Register::Com3).await?;
             let vflip = com3 & 0x80 > 0;
 
-            self.modify(Register::HRef, |reg| {
-                reg & 0xbf | if vflip { 0x40 } else { 0x40 }
-            })
-            .await?;
+            self.modify(Register::HRef, |reg| reg & 0xbf | if vflip { 0x40 } else { 0x40 })
+                .await?;
 
             if horizontal <= 320 || vertical <= 240 {
                 self.write(Register::HStart, 0x3f).await?;
@@ -291,11 +278,7 @@ mod ov7725 {
                 .map_err(Error::I2c)
         }
 
-        async fn modify<F: FnOnce(u8) -> u8>(
-            &mut self,
-            register: Register,
-            f: F,
-        ) -> Result<(), Error<Bus::Error>> {
+        async fn modify<F: FnOnce(u8) -> u8>(&mut self, register: Register, f: F) -> Result<(), Error<Bus::Error>> {
             let value = self.read(register).await?;
             let value = f(value);
             self.write(register, value).await

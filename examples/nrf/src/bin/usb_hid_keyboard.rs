@@ -1,53 +1,31 @@
 #![no_std]
 #![no_main]
-#![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 
 use core::mem;
 use core::sync::atomic::{AtomicBool, Ordering};
+
 use defmt::*;
-use embassy::channel::Signal;
-use embassy::executor::Spawner;
-use embassy::interrupt::InterruptExt;
-use embassy::time::Duration;
-use embassy::util::{select, select3, Either, Either3};
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::{Input, Pin, Pull};
-use embassy_nrf::interrupt;
-use embassy_nrf::pac;
-use embassy_nrf::usb::Driver;
-use embassy_nrf::Peripherals;
+use embassy_nrf::usb::{Driver, PowerUsb};
+use embassy_nrf::{interrupt, pac};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config, DeviceStateHandler};
-use embassy_usb_hid::{HidReaderWriter, ReportId, RequestHandler, State};
-use futures::future::join;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-static ENABLE_USB: Signal<bool> = Signal::new();
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
-fn on_power_interrupt(_: *mut ()) {
-    let regs = unsafe { &*pac::POWER::ptr() };
-
-    if regs.events_usbdetected.read().bits() != 0 {
-        regs.events_usbdetected.reset();
-        info!("Vbus detected, enabling USB...");
-        ENABLE_USB.signal(true);
-    }
-
-    if regs.events_usbremoved.read().bits() != 0 {
-        regs.events_usbremoved.reset();
-        info!("Vbus removed, disabling USB...");
-        ENABLE_USB.signal(false);
-    }
-}
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let clock: pac::CLOCK = unsafe { mem::transmute(()) };
-    let power: pac::POWER = unsafe { mem::transmute(()) };
 
     info!("Enabling ext hfosc...");
     clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
@@ -55,7 +33,8 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
-    let driver = Driver::new(p.USBD, irq);
+    let power_irq = interrupt::take!(POWER_CLOCK);
+    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -88,7 +67,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     );
 
     // Create classes on the builder.
-    let config = embassy_usb_hid::Config {
+    let config = embassy_usb::class::hid::Config {
         report_descriptor: KeyboardReport::desc(),
         request_handler: Some(&request_handler),
         poll_ms: 60,
@@ -99,35 +78,15 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     // Build the builder.
     let mut usb = builder.build();
 
-    let remote_wakeup = Signal::new();
+    let remote_wakeup: Signal<CriticalSectionRawMutex, _> = Signal::new();
 
     // Run the USB device.
     let usb_fut = async {
-        enable_command().await;
         loop {
-            match select(usb.run_until_suspend(), ENABLE_USB.wait()).await {
-                Either::First(_) => {}
-                Either::Second(enable) => {
-                    if enable {
-                        warn!("Enable when already enabled!");
-                    } else {
-                        usb.disable().await;
-                        enable_command().await;
-                    }
-                }
-            }
-
-            match select3(usb.wait_resume(), ENABLE_USB.wait(), remote_wakeup.wait()).await {
-                Either3::First(_) => (),
-                Either3::Second(enable) => {
-                    if enable {
-                        warn!("Enable when already enabled!");
-                    } else {
-                        usb.disable().await;
-                        enable_command().await;
-                    }
-                }
-                Either3::Third(_) => unwrap!(usb.remote_wakeup().await),
+            usb.run_until_suspend().await;
+            match select(usb.wait_resume(), remote_wakeup.wait()).await {
+                Either::First(_) => (),
+                Either::Second(_) => unwrap!(usb.remote_wakeup().await),
             }
         }
     };
@@ -177,28 +136,9 @@ async fn main(_spawner: Spawner, p: Peripherals) {
         reader.run(false, &request_handler).await;
     };
 
-    let power_irq = interrupt::take!(POWER_CLOCK);
-    power_irq.set_handler(on_power_interrupt);
-    power_irq.unpend();
-    power_irq.enable();
-
-    power
-        .intenset
-        .write(|w| w.usbdetected().set().usbremoved().set());
-
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
     join(usb_fut, join(in_fut, out_fut)).await;
-}
-
-async fn enable_command() {
-    loop {
-        if ENABLE_USB.wait().await {
-            break;
-        } else {
-            warn!("Received disable signal when already disabled!");
-        }
-    }
 }
 
 struct MyRequestHandler {}
@@ -214,11 +154,11 @@ impl RequestHandler for MyRequestHandler {
         OutResponse::Accepted
     }
 
-    fn set_idle(&self, id: Option<ReportId>, dur: Duration) {
+    fn set_idle_ms(&self, id: Option<ReportId>, dur: u32) {
         info!("Set idle rate for {:?} to {:?}", id, dur);
     }
 
-    fn get_idle(&self, id: Option<ReportId>) -> Option<Duration> {
+    fn get_idle_ms(&self, id: Option<ReportId>) -> Option<u32> {
         info!("Get idle rate for {:?}", id);
         None
     }
@@ -260,9 +200,7 @@ impl DeviceStateHandler for MyDeviceStateHandler {
     fn configured(&self, configured: bool) {
         self.configured.store(configured, Ordering::Relaxed);
         if configured {
-            info!(
-                "Device configured, it may now draw up to the configured current limit from Vbus."
-            )
+            info!("Device configured, it may now draw up to the configured current limit from Vbus.")
         } else {
             info!("Device is no longer configured, the Vbus current limit is 100mA.");
         }
@@ -275,9 +213,7 @@ impl DeviceStateHandler for MyDeviceStateHandler {
         } else {
             SUSPENDED.store(false, Ordering::Release);
             if self.configured.load(Ordering::Relaxed) {
-                info!(
-                    "Device resumed, it may now draw up to the configured current limit from Vbus"
-                );
+                info!("Device resumed, it may now draw up to the configured current limit from Vbus");
             } else {
                 info!("Device resumed, the Vbus current limit is 100mA");
             }

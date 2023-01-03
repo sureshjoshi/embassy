@@ -1,38 +1,44 @@
 #![macro_use]
 
-use core::marker::PhantomData;
+use core::future::poll_fn;
 use core::ptr;
 use core::task::Poll;
-use embassy::interrupt::{Interrupt, InterruptExt};
-use embassy::util::Unborrow;
+
 use embassy_hal_common::drop::DropBomb;
-use embassy_hal_common::unborrow;
-use futures::future::poll_fn;
+use embassy_hal_common::{into_ref, PeripheralRef};
 
-use crate::gpio::sealed::Pin as _;
 use crate::gpio::{self, Pin as GpioPin};
-use crate::pac;
-
-pub use crate::pac::qspi::ifconfig0::ADDRMODE_A as AddressMode;
-pub use crate::pac::qspi::ifconfig0::PPSIZE_A as WritePageSize;
-pub use crate::pac::qspi::ifconfig0::READOC_A as ReadOpcode;
-pub use crate::pac::qspi::ifconfig0::WRITEOC_A as WriteOpcode;
-
-// TODO
-// - config:
-//   - 32bit address mode
-//   - SPI freq
-//   - SPI sck delay
-//   - Deep power down mode (DPM)
-//   - SPI mode 3
-// - activate/deactivate
-// - set gpio in high drive
+use crate::interrupt::{Interrupt, InterruptExt};
+pub use crate::pac::qspi::ifconfig0::{
+    ADDRMODE_A as AddressMode, PPSIZE_A as WritePageSize, READOC_A as ReadOpcode, WRITEOC_A as WriteOpcode,
+};
+pub use crate::pac::qspi::ifconfig1::SPIMODE_A as SpiMode;
+use crate::{pac, Peripheral};
 
 pub struct DeepPowerDownConfig {
     /// Time required for entering DPM, in units of 16us
     pub enter_time: u16,
     /// Time required for exiting DPM, in units of 16us
     pub exit_time: u16,
+}
+
+pub enum Frequency {
+    M32 = 0,
+    M16 = 1,
+    M10_7 = 2,
+    M8 = 3,
+    M6_4 = 4,
+    M5_3 = 5,
+    M4_6 = 6,
+    M4 = 7,
+    M3_6 = 8,
+    M3_2 = 9,
+    M2_9 = 10,
+    M2_7 = 11,
+    M2_5 = 12,
+    M2_3 = 13,
+    M2_1 = 14,
+    M2 = 15,
 }
 
 #[non_exhaustive]
@@ -42,6 +48,12 @@ pub struct Config {
     pub write_opcode: WriteOpcode,
     pub write_page_size: WritePageSize,
     pub deep_power_down: Option<DeepPowerDownConfig>,
+    pub frequency: Frequency,
+    /// Value is specified in number of 16 MHz periods (62.5 ns)
+    pub sck_delay: u8,
+    /// Whether data is captured on the clock rising edge and data is output on a falling edge (MODE0) or vice-versa (MODE3)
+    pub spi_mode: SpiMode,
+    pub address_mode: AddressMode,
 }
 
 impl Default for Config {
@@ -52,6 +64,10 @@ impl Default for Config {
             xip_offset: 0,
             write_page_size: WritePageSize::_256BYTES,
             deep_power_down: None,
+            frequency: Frequency::M8,
+            sck_delay: 80,
+            spi_mode: SpiMode::MODE0,
+            address_mode: AddressMode::_24BIT,
         }
     }
 }
@@ -65,38 +81,38 @@ pub enum Error {
 }
 
 pub struct Qspi<'d, T: Instance, const FLASH_SIZE: usize> {
-    irq: T::Interrupt,
+    irq: PeripheralRef<'d, T::Interrupt>,
     dpm_enabled: bool,
-    phantom: PhantomData<&'d mut T>,
 }
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
     pub fn new(
-        _qspi: impl Unborrow<Target = T> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        sck: impl Unborrow<Target = impl GpioPin> + 'd,
-        csn: impl Unborrow<Target = impl GpioPin> + 'd,
-        io0: impl Unborrow<Target = impl GpioPin> + 'd,
-        io1: impl Unborrow<Target = impl GpioPin> + 'd,
-        io2: impl Unborrow<Target = impl GpioPin> + 'd,
-        io3: impl Unborrow<Target = impl GpioPin> + 'd,
+        _qspi: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        sck: impl Peripheral<P = impl GpioPin> + 'd,
+        csn: impl Peripheral<P = impl GpioPin> + 'd,
+        io0: impl Peripheral<P = impl GpioPin> + 'd,
+        io1: impl Peripheral<P = impl GpioPin> + 'd,
+        io2: impl Peripheral<P = impl GpioPin> + 'd,
+        io3: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Qspi<'d, T, FLASH_SIZE> {
-        unborrow!(irq, sck, csn, io0, io1, io2, io3);
+        into_ref!(irq, sck, csn, io0, io1, io2, io3);
 
         let r = T::regs();
 
-        let sck = sck.degrade();
-        let csn = csn.degrade();
-        let io0 = io0.degrade();
-        let io1 = io1.degrade();
-        let io2 = io2.degrade();
-        let io3 = io3.degrade();
-
-        for pin in [&sck, &csn, &io0, &io1, &io2, &io3] {
-            pin.set_high();
-            pin.conf().write(|w| w.dir().output().drive().h0h1());
-        }
+        sck.set_high();
+        csn.set_high();
+        io0.set_high();
+        io1.set_high();
+        io2.set_high();
+        io3.set_high();
+        sck.conf().write(|w| w.dir().output().drive().h0h1());
+        csn.conf().write(|w| w.dir().output().drive().h0h1());
+        io0.conf().write(|w| w.dir().output().drive().h0h1());
+        io1.conf().write(|w| w.dir().output().drive().h0h1());
+        io2.conf().write(|w| w.dir().output().drive().h0h1());
+        io3.conf().write(|w| w.dir().output().drive().h0h1());
 
         r.psel.sck.write(|w| unsafe { w.bits(sck.psel_bits()) });
         r.psel.csn.write(|w| unsafe { w.bits(csn.psel_bits()) });
@@ -106,7 +122,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
         r.psel.io3.write(|w| unsafe { w.bits(io3.psel_bits()) });
 
         r.ifconfig0.write(|w| {
-            w.addrmode().variant(AddressMode::_24BIT);
+            w.addrmode().variant(config.address_mode);
             w.dpmenable().bit(config.deep_power_down.is_some());
             w.ppsize().variant(config.write_page_size);
             w.readoc().variant(config.read_opcode);
@@ -123,10 +139,10 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
         }
 
         r.ifconfig1.write(|w| unsafe {
-            w.sckdelay().bits(80);
+            w.sckdelay().bits(config.sck_delay);
             w.dpmen().exit();
-            w.spimode().mode0();
-            w.sckfreq().bits(3);
+            w.spimode().variant(config.spi_mode);
+            w.sckfreq().bits(config.frequency as u8);
             w
         });
 
@@ -145,7 +161,6 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
         let mut res = Self {
             dpm_enabled: config.deep_power_down.is_some(),
             irq,
-            phantom: PhantomData,
         };
 
         r.events_ready.reset();
@@ -168,12 +183,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
         }
     }
 
-    pub async fn custom_instruction(
-        &mut self,
-        opcode: u8,
-        req: &[u8],
-        resp: &mut [u8],
-    ) -> Result<(), Error> {
+    pub async fn custom_instruction(&mut self, opcode: u8, req: &[u8], resp: &mut [u8]) -> Result<(), Error> {
         let bomb = DropBomb::new();
 
         let len = core::cmp::max(req.len(), resp.len()) as u8;
@@ -188,12 +198,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
         Ok(())
     }
 
-    pub fn blocking_custom_instruction(
-        &mut self,
-        opcode: u8,
-        req: &[u8],
-        resp: &mut [u8],
-    ) -> Result<(), Error> {
+    pub fn blocking_custom_instruction(&mut self, opcode: u8, req: &[u8], resp: &mut [u8]) -> Result<(), Error> {
         let len = core::cmp::max(req.len(), resp.len()) as u8;
         self.custom_instruction_start(opcode, req, len)?;
 
@@ -292,15 +297,9 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
 
         let r = T::regs();
 
-        r.read
-            .src
-            .write(|w| unsafe { w.src().bits(address as u32) });
-        r.read
-            .dst
-            .write(|w| unsafe { w.dst().bits(data.as_ptr() as u32) });
-        r.read
-            .cnt
-            .write(|w| unsafe { w.cnt().bits(data.len() as u32) });
+        r.read.src.write(|w| unsafe { w.src().bits(address as u32) });
+        r.read.dst.write(|w| unsafe { w.dst().bits(data.as_ptr() as u32) });
+        r.read.cnt.write(|w| unsafe { w.cnt().bits(data.len() as u32) });
 
         r.events_ready.reset();
         r.intenset.write(|w| w.ready().set());
@@ -310,27 +309,18 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
     }
 
     fn start_write(&mut self, address: usize, data: &[u8]) -> Result<(), Error> {
-        //info!("start_write ptr {}", data.as_ptr() as u32);
         assert_eq!(data.as_ptr() as u32 % 4, 0);
-        //info!("start_write OK ptr");
         assert_eq!(data.len() as u32 % 4, 0);
-        //info!("start_write OK len");
         assert_eq!(address as u32 % 4, 0);
-        //info!("start_write OK addr");
+
         if address > FLASH_SIZE {
             return Err(Error::OutOfBounds);
         }
 
         let r = T::regs();
-        r.write
-            .src
-            .write(|w| unsafe { w.src().bits(data.as_ptr() as u32) });
-        r.write
-            .dst
-            .write(|w| unsafe { w.dst().bits(address as u32) });
-        r.write
-            .cnt
-            .write(|w| unsafe { w.cnt().bits(data.len() as u32) });
+        r.write.src.write(|w| unsafe { w.src().bits(data.as_ptr() as u32) });
+        r.write.dst.write(|w| unsafe { w.dst().bits(address as u32) });
+        r.write.cnt.write(|w| unsafe { w.cnt().bits(data.len() as u32) });
 
         r.events_ready.reset();
         r.intenset.write(|w| w.ready().set());
@@ -346,9 +336,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
         }
 
         let r = T::regs();
-        r.erase
-            .ptr
-            .write(|w| unsafe { w.ptr().bits(address as u32) });
+        r.erase.ptr.write(|w| unsafe { w.ptr().bits(address as u32) });
         r.erase.len.write(|w| w.len()._4kb());
 
         r.events_ready.reset();
@@ -372,11 +360,8 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Qspi<'d, T, FLASH_SIZE> {
     pub async fn write(&mut self, address: usize, data: &[u8]) -> Result<(), Error> {
         let bomb = DropBomb::new();
 
-        //info!("WRITE {} bytes at {}", data.len(), address);
         self.start_write(address, data)?;
-        //info!("STARTED");
         self.wait_ready().await;
-        //info!("WRITE DONE");
 
         bomb.defuse();
 
@@ -458,9 +443,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Drop for Qspi<'d, T, FLASH_SIZE> 
     }
 }
 
-use embedded_storage::nor_flash::{
-    ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
-};
+use embedded_storage::nor_flash::{ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash};
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> ErrorType for Qspi<'d, T, FLASH_SIZE> {
     type Error = Error;
@@ -543,7 +526,7 @@ cfg_if::cfg_if! {
 }
 
 pub(crate) mod sealed {
-    use embassy::waitqueue::AtomicWaker;
+    use embassy_sync::waitqueue::AtomicWaker;
 
     use super::*;
 
@@ -564,7 +547,7 @@ pub(crate) mod sealed {
     }
 }
 
-pub trait Instance: Unborrow<Target = Self> + sealed::Instance + 'static {
+pub trait Instance: Peripheral<P = Self> + sealed::Instance + 'static {
     type Interrupt: Interrupt;
 }
 

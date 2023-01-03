@@ -1,100 +1,79 @@
 use core::marker::PhantomData;
-use embassy::util::Unborrow;
-use embassy_hal_common::unborrow;
+
+use embassy_hal_common::{into_ref, PeripheralRef};
 
 use super::*;
 #[allow(unused_imports)]
 use crate::gpio::sealed::{AFType, Pin};
+use crate::gpio::AnyPin;
 use crate::time::Hertz;
+use crate::Peripheral;
 
-pub struct SimplePwm<'d, T> {
-    phantom: PhantomData<&'d mut T>,
-    inner: T,
+pub struct Ch1;
+pub struct Ch2;
+pub struct Ch3;
+pub struct Ch4;
+
+pub struct PwmPin<'d, Perip, Channel> {
+    _pin: PeripheralRef<'d, AnyPin>,
+    phantom: PhantomData<(Perip, Channel)>,
 }
 
-macro_rules! config_pins {
-    ($($pin:ident),*) => {
-        unborrow!($($pin),*);
-        // NOTE(unsafe) Exclusive access to the registers
-        critical_section::with(|_| unsafe {
-            $(
-                $pin.set_low();
-                $pin.set_as_af($pin.af_num(), AFType::OutputPushPull);
-                #[cfg(gpio_v2)]
-                $pin.set_speed(crate::gpio::Speed::VeryHigh);
-            )*
-        })
+macro_rules! channel_impl {
+    ($new_chx:ident, $channel:ident, $pin_trait:ident) => {
+        impl<'d, Perip: CaptureCompare16bitInstance> PwmPin<'d, Perip, $channel> {
+            pub fn $new_chx(pin: impl Peripheral<P = impl $pin_trait<Perip>> + 'd) -> Self {
+                into_ref!(pin);
+                critical_section::with(|_| unsafe {
+                    pin.set_low();
+                    pin.set_as_af(pin.af_num(), AFType::OutputPushPull);
+                    #[cfg(gpio_v2)]
+                    pin.set_speed(crate::gpio::Speed::VeryHigh);
+                });
+                PwmPin {
+                    _pin: pin.map_into(),
+                    phantom: PhantomData,
+                }
+            }
+        }
     };
 }
 
+channel_impl!(new_ch1, Ch1, Channel1Pin);
+channel_impl!(new_ch2, Ch2, Channel2Pin);
+channel_impl!(new_ch3, Ch3, Channel3Pin);
+channel_impl!(new_ch4, Ch4, Channel4Pin);
+
+pub struct SimplePwm<'d, T> {
+    inner: PeripheralRef<'d, T>,
+}
+
 impl<'d, T: CaptureCompare16bitInstance> SimplePwm<'d, T> {
-    pub fn new_1ch<F: Into<Hertz>>(
-        tim: impl Unborrow<Target = T> + 'd,
-        ch1: impl Unborrow<Target = impl Channel1Pin<T>> + 'd,
-        freq: F,
+    pub fn new(
+        tim: impl Peripheral<P = T> + 'd,
+        _ch1: Option<PwmPin<'d, T, Ch1>>,
+        _ch2: Option<PwmPin<'d, T, Ch2>>,
+        _ch3: Option<PwmPin<'d, T, Ch3>>,
+        _ch4: Option<PwmPin<'d, T, Ch4>>,
+        freq: Hertz,
     ) -> Self {
-        Self::new_inner(tim, freq, move || {
-            config_pins!(ch1);
-        })
+        Self::new_inner(tim, freq)
     }
 
-    pub fn new_2ch<F: Into<Hertz>>(
-        tim: impl Unborrow<Target = T> + 'd,
-        ch1: impl Unborrow<Target = impl Channel1Pin<T>> + 'd,
-        ch2: impl Unborrow<Target = impl Channel2Pin<T>> + 'd,
-        freq: F,
-    ) -> Self {
-        Self::new_inner(tim, freq, move || {
-            config_pins!(ch1, ch2);
-        })
-    }
-
-    pub fn new_3ch<F: Into<Hertz>>(
-        tim: impl Unborrow<Target = T> + 'd,
-        ch1: impl Unborrow<Target = impl Channel1Pin<T>> + 'd,
-        ch2: impl Unborrow<Target = impl Channel2Pin<T>> + 'd,
-        ch3: impl Unborrow<Target = impl Channel3Pin<T>> + 'd,
-        freq: F,
-    ) -> Self {
-        Self::new_inner(tim, freq, move || {
-            config_pins!(ch1, ch2, ch3);
-        })
-    }
-
-    pub fn new_4ch<F: Into<Hertz>>(
-        tim: impl Unborrow<Target = T> + 'd,
-        ch1: impl Unborrow<Target = impl Channel1Pin<T>> + 'd,
-        ch2: impl Unborrow<Target = impl Channel2Pin<T>> + 'd,
-        ch3: impl Unborrow<Target = impl Channel3Pin<T>> + 'd,
-        ch4: impl Unborrow<Target = impl Channel4Pin<T>> + 'd,
-        freq: F,
-    ) -> Self {
-        Self::new_inner(tim, freq, move || {
-            config_pins!(ch1, ch2, ch3, ch4);
-        })
-    }
-
-    fn new_inner<F: Into<Hertz>>(
-        tim: impl Unborrow<Target = T> + 'd,
-        freq: F,
-        configure_pins: impl FnOnce(),
-    ) -> Self {
-        unborrow!(tim);
+    fn new_inner(tim: impl Peripheral<P = T> + 'd, freq: Hertz) -> Self {
+        into_ref!(tim);
 
         T::enable();
         <T as crate::rcc::sealed::RccPeripheral>::reset();
 
-        configure_pins();
-
-        let mut this = Self {
-            inner: tim,
-            phantom: PhantomData,
-        };
+        let mut this = Self { inner: tim };
 
         this.inner.set_frequency(freq);
         this.inner.start();
 
         unsafe {
+            this.inner.enable_outputs(true);
+
             this.inner
                 .set_output_compare_mode(Channel::Ch1, OutputCompareMode::PwmMode1);
             this.inner
@@ -119,7 +98,7 @@ impl<'d, T: CaptureCompare16bitInstance> SimplePwm<'d, T> {
         }
     }
 
-    pub fn set_freq<F: Into<Hertz>>(&mut self, freq: F) {
+    pub fn set_freq(&mut self, freq: Hertz) {
         self.inner.set_frequency(freq);
     }
 

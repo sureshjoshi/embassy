@@ -1,48 +1,26 @@
+use embassy_hal_common::{into_ref, PeripheralRef};
+use embedded_storage::nor_flash::{ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash};
+
+pub use crate::pac::{ERASE_SIZE, ERASE_VALUE, FLASH_BASE, FLASH_SIZE, WRITE_SIZE};
 use crate::peripherals::FLASH;
-use core::marker::PhantomData;
-use embassy::util::Unborrow;
-use embassy_hal_common::unborrow;
-
-use embedded_storage::nor_flash::{
-    ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash,
-};
-
-pub use crate::pac::ERASE_SIZE;
-pub use crate::pac::ERASE_VALUE;
-pub use crate::pac::FLASH_BASE;
-pub use crate::pac::FLASH_SIZE;
-pub use crate::pac::WRITE_SIZE;
+use crate::Peripheral;
 const FLASH_END: usize = FLASH_BASE + FLASH_SIZE;
 
 #[cfg_attr(any(flash_wl, flash_wb, flash_l0, flash_l1, flash_l4), path = "l.rs")]
 #[cfg_attr(flash_f3, path = "f3.rs")]
+#[cfg_attr(flash_f4, path = "f4.rs")]
 #[cfg_attr(flash_f7, path = "f7.rs")]
 #[cfg_attr(flash_h7, path = "h7.rs")]
 mod family;
 
 pub struct Flash<'d> {
-    _inner: FLASH,
-    _phantom: PhantomData<&'d mut FLASH>,
+    _inner: PeripheralRef<'d, FLASH>,
 }
 
 impl<'d> Flash<'d> {
-    pub fn new(p: impl Unborrow<Target = FLASH>) -> Self {
-        unborrow!(p);
-        Self {
-            _inner: p,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn unlock(p: impl Unborrow<Target = FLASH>) -> Self {
-        let flash = Self::new(p);
-
-        unsafe { family::unlock() };
-        flash
-    }
-
-    pub fn lock(&mut self) {
-        unsafe { family::lock() };
+    pub fn new(p: impl Peripheral<P = FLASH> + 'd) -> Self {
+        into_ref!(p);
+        Self { _inner: p }
     }
 
     pub fn blocking_read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Error> {
@@ -68,7 +46,12 @@ impl<'d> Flash<'d> {
 
         self.clear_all_err();
 
-        unsafe { family::blocking_write(offset, buf) }
+        unsafe {
+            family::unlock();
+            let res = family::blocking_write(offset, buf);
+            family::lock();
+            res
+        }
     }
 
     pub fn blocking_erase(&mut self, from: u32, to: u32) -> Result<(), Error> {
@@ -77,13 +60,18 @@ impl<'d> Flash<'d> {
         if to < from || to as usize > FLASH_END {
             return Err(Error::Size);
         }
-        if ((to - from) as usize % ERASE_SIZE) != 0 {
+        if (from as usize % ERASE_SIZE) != 0 || (to as usize % ERASE_SIZE) != 0 {
             return Err(Error::Unaligned);
         }
 
         self.clear_all_err();
 
-        unsafe { family::blocking_erase(from, to) }
+        unsafe {
+            family::unlock();
+            let res = family::blocking_erase(from, to);
+            family::lock();
+            res
+        }
     }
 
     fn clear_all_err(&mut self) {
@@ -93,7 +81,7 @@ impl<'d> Flash<'d> {
 
 impl Drop for Flash<'_> {
     fn drop(&mut self) {
-        self.lock();
+        unsafe { family::lock() };
     }
 }
 

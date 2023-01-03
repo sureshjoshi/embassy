@@ -1,15 +1,14 @@
 use core::sync::atomic::{fence, Ordering};
 use core::task::Waker;
 
-use embassy::interrupt::{Interrupt, InterruptExt};
-use embassy::waitqueue::AtomicWaker;
-
-use crate::_generated::DMA_CHANNEL_COUNT;
-use crate::interrupt;
-use crate::pac;
-use crate::pac::dma::{regs, vals};
+use embassy_cortex_m::interrupt::Priority;
+use embassy_sync::waitqueue::AtomicWaker;
 
 use super::{Burst, FlowControl, Request, TransferOptions, Word, WordSize};
+use crate::_generated::DMA_CHANNEL_COUNT;
+use crate::interrupt::{Interrupt, InterruptExt};
+use crate::pac::dma::{regs, vals};
+use crate::{interrupt, pac};
 
 impl From<WordSize> for vals::Size {
     fn from(raw: WordSize) -> Self {
@@ -69,10 +68,12 @@ impl State {
 static STATE: State = State::new();
 
 /// safety: must be called only once
-pub(crate) unsafe fn init() {
+pub(crate) unsafe fn init(irq_priority: Priority) {
     foreach_interrupt! {
         ($peri:ident, dma, $block:ident, $signal_name:ident, $irq:ident) => {
-            interrupt::$irq::steal().enable();
+            let irq = interrupt::$irq::steal();
+            irq.set_priority(irq_priority);
+            irq.enable();
         };
     }
     crate::_generated::init_dma();
@@ -101,15 +102,14 @@ foreach_dma_channel! {
                 )
             }
 
-            unsafe fn start_write_repeated<W: Word>(&mut self, request: Request, repeated: W, count: usize, reg_addr: *mut W, options: TransferOptions) {
-                let buf = [repeated];
+            unsafe fn start_write_repeated<W: Word>(&mut self, request: Request, repeated: *const W, count: usize, reg_addr: *mut W, options: TransferOptions) {
                 low_level_api::start_transfer(
                     pac::$dma_peri,
                     $channel_num,
                     request,
                     vals::Dir::MEMORYTOPERIPHERAL,
                     reg_addr as *const u32,
-                    buf.as_ptr() as *mut u32,
+                    repeated as *mut u32,
                     count,
                     false,
                     vals::Size::from(W::bits()),
@@ -407,10 +407,7 @@ mod low_level_api {
         let isr = dma.isr(channel_num / 4).read();
 
         if isr.teif(channel_num % 4) {
-            panic!(
-                "DMA: error on DMA@{:08x} channel {}",
-                dma.0 as u32, channel_num
-            );
+            panic!("DMA: error on DMA@{:08x} channel {}", dma.0 as u32, channel_num);
         }
 
         if isr.tcif(channel_num % 4) && cr.read().tcie() {
@@ -418,8 +415,7 @@ mod low_level_api {
                 cr.write(|_| ()); // Disable channel with the default value.
             } else {
                 // for double buffered mode, clear TCIF flag but do not stop the transfer
-                dma.ifcr(channel_num / 4)
-                    .write(|w| w.set_tcif(channel_num % 4, true));
+                dma.ifcr(channel_num / 4).write(|w| w.set_tcif(channel_num % 4, true));
             }
             STATE.channels[state_index].waker.wake();
         }

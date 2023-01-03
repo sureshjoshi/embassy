@@ -1,14 +1,14 @@
 use core::cell::Cell;
 use core::sync::atomic::{compiler_fence, AtomicU32, AtomicU8, Ordering};
 use core::{mem, ptr};
-use critical_section::CriticalSection;
-use embassy::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy::blocking_mutex::CriticalSectionMutex as Mutex;
-use embassy::interrupt::{Interrupt, InterruptExt};
-use embassy::time::driver::{AlarmHandle, Driver};
 
-use crate::interrupt;
-use crate::pac;
+use critical_section::CriticalSection;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::CriticalSectionMutex as Mutex;
+use embassy_time::driver::{AlarmHandle, Driver};
+
+use crate::interrupt::{Interrupt, InterruptExt};
+use crate::{interrupt, pac};
 
 fn rtc() -> &'static pac::rtc0::RegisterBlock {
     unsafe { &*pac::RTC1::ptr() }
@@ -119,7 +119,7 @@ struct RtcDriver {
 }
 
 const ALARM_STATE_NEW: AlarmState = AlarmState::new();
-embassy::time_driver_impl!(static DRIVER: RtcDriver = RtcDriver {
+embassy_time::time_driver_impl!(static DRIVER: RtcDriver = RtcDriver {
     period: AtomicU32::new(0),
     alarm_count: AtomicU8::new(0),
     alarms: Mutex::const_new(CriticalSectionRawMutex::new(), [ALARM_STATE_NEW; ALARM_COUNT]),
@@ -220,15 +220,13 @@ impl Driver for RtcDriver {
     }
 
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        let id = self
-            .alarm_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
-                if x < ALARM_COUNT as u8 {
-                    Some(x + 1)
-                } else {
-                    None
-                }
-            });
+        let id = self.alarm_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+            if x < ALARM_COUNT as u8 {
+                Some(x + 1)
+            } else {
+                None
+            }
+        });
 
         match id {
             Ok(id) => Some(AlarmHandle::new(id)),
@@ -245,21 +243,24 @@ impl Driver for RtcDriver {
         })
     }
 
-    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) {
+    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
         critical_section::with(|cs| {
             let n = alarm.id() as _;
             let alarm = self.get_alarm(cs, alarm);
             alarm.timestamp.set(timestamp);
 
-            let t = self.now();
-
-            // If alarm timestamp has passed, trigger it instantly.
-            if timestamp <= t {
-                self.trigger_alarm(n, cs);
-                return;
-            }
-
             let r = rtc();
+
+            let t = self.now();
+            if timestamp <= t {
+                // If alarm timestamp has passed the alarm will not fire.
+                // Disarm the alarm and return `false` to indicate that.
+                r.intenclr.write(|w| unsafe { w.bits(compare_n(n)) });
+
+                alarm.timestamp.set(u64::MAX);
+
+                return false;
+            }
 
             // If it hasn't triggered yet, setup it in the compare channel.
 
@@ -289,6 +290,8 @@ impl Driver for RtcDriver {
                 // It will be setup later by `next_period`.
                 r.intenclr.write(|w| unsafe { w.bits(compare_n(n)) });
             }
+
+            true
         })
     }
 }

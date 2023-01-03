@@ -3,13 +3,12 @@ use crate::pac::rcc::vals::{self, Hpre, Hsidiv, Ppre, Sw};
 use crate::pac::{FLASH, PWR, RCC};
 use crate::rcc::{set_freqs, Clocks};
 use crate::time::Hertz;
-use crate::time::U32Ext;
 
 /// HSI speed
-pub const HSI_FREQ: u32 = 16_000_000;
+pub const HSI_FREQ: Hertz = Hertz(16_000_000);
 
 /// LSI speed
-pub const LSI_FREQ: u32 = 32_000;
+pub const LSI_FREQ: Hertz = Hertz(32_000);
 
 /// System clock mux source
 #[derive(Clone, Copy)]
@@ -249,7 +248,7 @@ impl PllConfig {
     pub(crate) unsafe fn init(self) -> u32 {
         assert!(self.n >= 8 && self.n <= 86);
         let (src, input_freq) = match self.source {
-            PllSrc::HSI16 => (vals::Pllsrc::HSI16, HSI_FREQ),
+            PllSrc::HSI16 => (vals::Pllsrc::HSI16, HSI_FREQ.0),
             PllSrc::HSE(freq) => (vals::Pllsrc::HSE, freq.0),
         };
 
@@ -345,7 +344,7 @@ pub(crate) unsafe fn init(config: Config) {
             });
             while !RCC.cr().read().hsirdy() {}
 
-            (HSI_FREQ >> div.0, Sw::HSI)
+            (HSI_FREQ.0 >> div.0, Sw::HSI)
         }
         ClockSrc::HSE(freq) => {
             // Enable HSE
@@ -362,7 +361,7 @@ pub(crate) unsafe fn init(config: Config) {
             // Enable LSI
             RCC.csr().write(|w| w.set_lsion(true));
             while !RCC.csr().read().lsirdy() {}
-            (LSI_FREQ, Sw::LSI)
+            (LSI_FREQ.0, Sw::LSI)
         }
     };
 
@@ -450,14 +449,14 @@ pub(crate) unsafe fn init(config: Config) {
     };
 
     if config.low_power_run {
-        assert!(sys_clk.hz() <= 2_000_000.hz());
+        assert!(sys_clk <= 2_000_000);
         PWR.cr1().modify(|w| w.set_lpr(true));
     }
 
     set_freqs(Clocks {
-        sys: sys_clk.hz(),
-        ahb1: ahb_freq.hz(),
-        apb1: apb_freq.hz(),
-        apb1_tim: apb_tim_freq.hz(),
+        sys: Hertz(sys_clk),
+        ahb1: Hertz(ahb_freq),
+        apb1: Hertz(apb_freq),
+        apb1_tim: Hertz(apb_tim_freq),
     });
 }

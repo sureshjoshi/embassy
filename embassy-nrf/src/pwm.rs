@@ -1,36 +1,35 @@
 #![macro_use]
 
-use core::marker::PhantomData;
 use core::sync::atomic::{compiler_fence, Ordering};
-use embassy::util::Unborrow;
-use embassy_hal_common::unborrow;
+
+use embassy_hal_common::{into_ref, PeripheralRef};
 
 use crate::gpio::sealed::Pin as _;
 use crate::gpio::{AnyPin, Pin as GpioPin, PselBits};
 use crate::interrupt::Interrupt;
-use crate::pac;
 use crate::ppi::{Event, Task};
 use crate::util::slice_in_ram_or;
+use crate::{pac, Peripheral};
 
 /// SimplePwm is the traditional pwm interface you're probably used to, allowing
 /// to simply set a duty cycle across up to four channels.
 pub struct SimplePwm<'d, T: Instance> {
-    phantom: PhantomData<&'d mut T>,
+    _peri: PeripheralRef<'d, T>,
     duty: [u16; 4],
-    ch0: Option<AnyPin>,
-    ch1: Option<AnyPin>,
-    ch2: Option<AnyPin>,
-    ch3: Option<AnyPin>,
+    ch0: Option<PeripheralRef<'d, AnyPin>>,
+    ch1: Option<PeripheralRef<'d, AnyPin>>,
+    ch2: Option<PeripheralRef<'d, AnyPin>>,
+    ch3: Option<PeripheralRef<'d, AnyPin>>,
 }
 
 /// SequencePwm allows you to offload the updating of a sequence of duty cycles
 /// to up to four channels, as well as repeat that sequence n times.
 pub struct SequencePwm<'d, T: Instance> {
-    phantom: PhantomData<&'d mut T>,
-    ch0: Option<AnyPin>,
-    ch1: Option<AnyPin>,
-    ch2: Option<AnyPin>,
-    ch3: Option<AnyPin>,
+    _peri: PeripheralRef<'d, T>,
+    ch0: Option<PeripheralRef<'d, AnyPin>>,
+    ch1: Option<PeripheralRef<'d, AnyPin>>,
+    ch2: Option<PeripheralRef<'d, AnyPin>>,
+    ch3: Option<PeripheralRef<'d, AnyPin>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,48 +50,41 @@ impl<'d, T: Instance> SequencePwm<'d, T> {
     /// Create a new 1-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_1ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
-        unborrow!(ch0);
-        Self::new_inner(pwm, Some(ch0.degrade()), None, None, None, config)
+        into_ref!(ch0);
+        Self::new_inner(pwm, Some(ch0.map_into()), None, None, None, config)
     }
 
     /// Create a new 2-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_2ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch1: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
+        ch1: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
-        unborrow!(ch0, ch1);
-        Self::new_inner(
-            pwm,
-            Some(ch0.degrade()),
-            Some(ch1.degrade()),
-            None,
-            None,
-            config,
-        )
+        into_ref!(ch0, ch1);
+        Self::new_inner(pwm, Some(ch0.map_into()), Some(ch1.map_into()), None, None, config)
     }
 
     /// Create a new 3-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_3ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch1: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch2: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
+        ch1: impl Peripheral<P = impl GpioPin> + 'd,
+        ch2: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
-        unborrow!(ch0, ch1, ch2);
+        into_ref!(ch0, ch1, ch2);
         Self::new_inner(
             pwm,
-            Some(ch0.degrade()),
-            Some(ch1.degrade()),
-            Some(ch2.degrade()),
+            Some(ch0.map_into()),
+            Some(ch1.map_into()),
+            Some(ch2.map_into()),
             None,
             config,
         )
@@ -101,32 +93,34 @@ impl<'d, T: Instance> SequencePwm<'d, T> {
     /// Create a new 4-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_4ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch1: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch2: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch3: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
+        ch1: impl Peripheral<P = impl GpioPin> + 'd,
+        ch2: impl Peripheral<P = impl GpioPin> + 'd,
+        ch3: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Result<Self, Error> {
-        unborrow!(ch0, ch1, ch2, ch3);
+        into_ref!(ch0, ch1, ch2, ch3);
         Self::new_inner(
             pwm,
-            Some(ch0.degrade()),
-            Some(ch1.degrade()),
-            Some(ch2.degrade()),
-            Some(ch3.degrade()),
+            Some(ch0.map_into()),
+            Some(ch1.map_into()),
+            Some(ch2.map_into()),
+            Some(ch3.map_into()),
             config,
         )
     }
 
     fn new_inner(
-        _pwm: impl Unborrow<Target = T> + 'd,
-        ch0: Option<AnyPin>,
-        ch1: Option<AnyPin>,
-        ch2: Option<AnyPin>,
-        ch3: Option<AnyPin>,
+        _pwm: impl Peripheral<P = T> + 'd,
+        ch0: Option<PeripheralRef<'d, AnyPin>>,
+        ch1: Option<PeripheralRef<'d, AnyPin>>,
+        ch2: Option<PeripheralRef<'d, AnyPin>>,
+        ch3: Option<PeripheralRef<'d, AnyPin>>,
         config: Config,
     ) -> Result<Self, Error> {
+        into_ref!(_pwm);
+
         let r = T::regs();
 
         if let Some(pin) = &ch0 {
@@ -171,13 +165,11 @@ impl<'d, T: Instance> SequencePwm<'d, T> {
             CounterMode::UpAndDown => w.updown().up_and_down(),
             CounterMode::Up => w.updown().up(),
         });
-        r.prescaler
-            .write(|w| w.prescaler().bits(config.prescaler as u8));
-        r.countertop
-            .write(|w| unsafe { w.countertop().bits(config.max_duty) });
+        r.prescaler.write(|w| w.prescaler().bits(config.prescaler as u8));
+        r.countertop.write(|w| unsafe { w.countertop().bits(config.max_duty) });
 
         Ok(Self {
-            phantom: PhantomData,
+            _peri: _pwm,
             ch0,
             ch1,
             ch2,
@@ -391,9 +383,7 @@ impl<'d, 's, T: Instance> SingleSequencer<'d, 's, T> {
     pub fn start(&self, times: SingleSequenceMode) -> Result<(), Error> {
         let (start_seq, times) = match times {
             SingleSequenceMode::Times(n) if n == 1 => (StartSequence::One, SequenceMode::Loop(1)),
-            SingleSequenceMode::Times(n) if n & 1 == 1 => {
-                (StartSequence::One, SequenceMode::Loop((n / 2) + 1))
-            }
+            SingleSequenceMode::Times(n) if n & 1 == 1 => (StartSequence::One, SequenceMode::Loop((n / 2) + 1)),
             SingleSequenceMode::Times(n) => (StartSequence::Zero, SequenceMode::Loop(n / 2)),
             SingleSequenceMode::Infinite => (StartSequence::Zero, SequenceMode::Infinite),
         };
@@ -424,11 +414,7 @@ pub struct Sequencer<'d, 's, T: Instance> {
 impl<'d, 's, T: Instance> Sequencer<'d, 's, T> {
     /// Create a new double sequence. In the absence of sequence 1, sequence 0
     /// will be used twice in the one loop.
-    pub fn new(
-        pwm: &'s mut SequencePwm<'d, T>,
-        sequence0: Sequence<'s>,
-        sequence1: Option<Sequence<'s>>,
-    ) -> Self {
+    pub fn new(pwm: &'s mut SequencePwm<'d, T>, sequence0: Sequence<'s>, sequence1: Option<Sequence<'s>>) -> Self {
         Sequencer {
             _pwm: pwm,
             sequence0,
@@ -457,42 +443,26 @@ impl<'d, 's, T: Instance> Sequencer<'d, 's, T> {
 
         let r = T::regs();
 
-        r.seq0
-            .refresh
-            .write(|w| unsafe { w.bits(sequence0.config.refresh) });
-        r.seq0
-            .enddelay
-            .write(|w| unsafe { w.bits(sequence0.config.end_delay) });
-        r.seq0
-            .ptr
-            .write(|w| unsafe { w.bits(sequence0.words.as_ptr() as u32) });
-        r.seq0
-            .cnt
-            .write(|w| unsafe { w.bits(sequence0.words.len() as u32) });
+        r.seq0.refresh.write(|w| unsafe { w.bits(sequence0.config.refresh) });
+        r.seq0.enddelay.write(|w| unsafe { w.bits(sequence0.config.end_delay) });
+        r.seq0.ptr.write(|w| unsafe { w.bits(sequence0.words.as_ptr() as u32) });
+        r.seq0.cnt.write(|w| unsafe { w.bits(sequence0.words.len() as u32) });
 
-        r.seq1
-            .refresh
-            .write(|w| unsafe { w.bits(alt_sequence.config.refresh) });
+        r.seq1.refresh.write(|w| unsafe { w.bits(alt_sequence.config.refresh) });
         r.seq1
             .enddelay
             .write(|w| unsafe { w.bits(alt_sequence.config.end_delay) });
         r.seq1
             .ptr
             .write(|w| unsafe { w.bits(alt_sequence.words.as_ptr() as u32) });
-        r.seq1
-            .cnt
-            .write(|w| unsafe { w.bits(alt_sequence.words.len() as u32) });
+        r.seq1.cnt.write(|w| unsafe { w.bits(alt_sequence.words.len() as u32) });
 
         r.enable.write(|w| w.enable().enabled());
 
         // defensive before seqstart
         compiler_fence(Ordering::SeqCst);
 
-        let seqstart_index = if start_seq == StartSequence::One {
-            1
-        } else {
-            0
-        };
+        let seqstart_index = if start_seq == StartSequence::One { 1 } else { 0 };
 
         match times {
             // just the one time, no loop count
@@ -604,69 +574,74 @@ pub enum CounterMode {
 impl<'d, T: Instance> SimplePwm<'d, T> {
     /// Create a new 1-channel PWM
     #[allow(unused_unsafe)]
-    pub fn new_1ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-    ) -> Self {
-        unborrow!(ch0);
-        Self::new_inner(pwm, Some(ch0.degrade()), None, None, None)
+    pub fn new_1ch(pwm: impl Peripheral<P = T> + 'd, ch0: impl Peripheral<P = impl GpioPin> + 'd) -> Self {
+        unsafe {
+            into_ref!(ch0);
+            Self::new_inner(pwm, Some(ch0.map_into()), None, None, None)
+        }
     }
 
     /// Create a new 2-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_2ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch1: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
+        ch1: impl Peripheral<P = impl GpioPin> + 'd,
     ) -> Self {
-        unborrow!(ch0, ch1);
-        Self::new_inner(pwm, Some(ch0.degrade()), Some(ch1.degrade()), None, None)
+        into_ref!(ch0, ch1);
+        Self::new_inner(pwm, Some(ch0.map_into()), Some(ch1.map_into()), None, None)
     }
 
     /// Create a new 3-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_3ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch1: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch2: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
+        ch1: impl Peripheral<P = impl GpioPin> + 'd,
+        ch2: impl Peripheral<P = impl GpioPin> + 'd,
     ) -> Self {
-        unborrow!(ch0, ch1, ch2);
-        Self::new_inner(
-            pwm,
-            Some(ch0.degrade()),
-            Some(ch1.degrade()),
-            Some(ch2.degrade()),
-            None,
-        )
+        unsafe {
+            into_ref!(ch0, ch1, ch2);
+            Self::new_inner(
+                pwm,
+                Some(ch0.map_into()),
+                Some(ch1.map_into()),
+                Some(ch2.map_into()),
+                None,
+            )
+        }
     }
 
     /// Create a new 4-channel PWM
     #[allow(unused_unsafe)]
     pub fn new_4ch(
-        pwm: impl Unborrow<Target = T> + 'd,
-        ch0: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch1: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch2: impl Unborrow<Target = impl GpioPin> + 'd,
-        ch3: impl Unborrow<Target = impl GpioPin> + 'd,
+        pwm: impl Peripheral<P = T> + 'd,
+        ch0: impl Peripheral<P = impl GpioPin> + 'd,
+        ch1: impl Peripheral<P = impl GpioPin> + 'd,
+        ch2: impl Peripheral<P = impl GpioPin> + 'd,
+        ch3: impl Peripheral<P = impl GpioPin> + 'd,
     ) -> Self {
-        unborrow!(ch0, ch1, ch2, ch3);
-        Self::new_inner(
-            pwm,
-            Some(ch0.degrade()),
-            Some(ch1.degrade()),
-            Some(ch2.degrade()),
-            Some(ch3.degrade()),
-        )
+        unsafe {
+            into_ref!(ch0, ch1, ch2, ch3);
+            Self::new_inner(
+                pwm,
+                Some(ch0.map_into()),
+                Some(ch1.map_into()),
+                Some(ch2.map_into()),
+                Some(ch3.map_into()),
+            )
+        }
     }
 
     fn new_inner(
-        _pwm: impl Unborrow<Target = T> + 'd,
-        ch0: Option<AnyPin>,
-        ch1: Option<AnyPin>,
-        ch2: Option<AnyPin>,
-        ch3: Option<AnyPin>,
+        _pwm: impl Peripheral<P = T> + 'd,
+        ch0: Option<PeripheralRef<'d, AnyPin>>,
+        ch1: Option<PeripheralRef<'d, AnyPin>>,
+        ch2: Option<PeripheralRef<'d, AnyPin>>,
+        ch3: Option<PeripheralRef<'d, AnyPin>>,
     ) -> Self {
+        into_ref!(_pwm);
+
         let r = T::regs();
 
         if let Some(pin) = &ch0 {
@@ -694,7 +669,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         r.psel.out[3].write(|w| unsafe { w.bits(ch3.psel_bits()) });
 
         let pwm = Self {
-            phantom: PhantomData,
+            _peri: _pwm,
             ch0,
             ch1,
             ch2,
@@ -709,9 +684,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         // Enable
         r.enable.write(|w| w.enable().enabled());
 
-        r.seq0
-            .ptr
-            .write(|w| unsafe { w.bits((&pwm.duty).as_ptr() as u32) });
+        r.seq0.ptr.write(|w| unsafe { w.bits((&pwm.duty).as_ptr() as u32) });
 
         r.seq0.cnt.write(|w| unsafe { w.bits(4) });
         r.seq0.refresh.write(|w| unsafe { w.bits(0) });
@@ -750,9 +723,7 @@ impl<'d, T: Instance> SimplePwm<'d, T> {
         self.duty[channel] = duty & 0x7FFF;
 
         // reload ptr in case self was moved
-        r.seq0
-            .ptr
-            .write(|w| unsafe { w.bits((&self.duty).as_ptr() as u32) });
+        r.seq0.ptr.write(|w| unsafe { w.bits((&self.duty).as_ptr() as u32) });
 
         // defensive before seqstart
         compiler_fence(Ordering::SeqCst);
@@ -857,7 +828,7 @@ pub(crate) mod sealed {
     }
 }
 
-pub trait Instance: Unborrow<Target = Self> + sealed::Instance + 'static {
+pub trait Instance: Peripheral<P = Self> + sealed::Instance + 'static {
     type Interrupt: Interrupt;
 }
 

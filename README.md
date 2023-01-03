@@ -2,7 +2,7 @@
 
 Embassy is the next-generation framework for embedded applications. Write safe, correct and energy-efficient embedded code faster, using the Rust programming language, its async facilities, and the Embassy libraries.
 
-## [Documentation](https://embassy.dev/embassy/dev/index.html) - [API reference](https://docs.embassy.dev/) - [Website](https://embassy.dev/) - [Chat](https://matrix.to/#/#embassy-rs:matrix.org)
+## <a href="https://embassy.dev/dev/index.html">Documentation</a> - <a href="https://docs.embassy.dev/">API reference</a> - <a href="https://embassy.dev/">Website</a> - <a href="https://matrix.to/#/#embassy-rs:matrix.org">Chat</a>
 ## Rust + async ❤️ embedded
 
 The Rust programming language is blazingly fast and memory-efficient, with no runtime, garbage collector or OS. It catches a wide variety of bugs at compile time, thanks to its full memory- and thread-safety, and expressive type system. 
@@ -16,7 +16,7 @@ Rust's <a href="https://rust-lang.github.io/async-book/">async/await</a> allows 
   - <a href="https://docs.embassy.dev/embassy-nrf/">embassy-nrf</a>, for the Nordic Semiconductor nRF52, nRF53, nRF91 series.
 
 - **Time that Just Works** - 
-No more messing with hardware timers. <a href="https://docs.embassy.dev/embassy/git/thumbv7em-none-eabihf/time/index.html">embassy::time</a> provides Instant, Duration and Timer types that are globally available and never overflow.
+No more messing with hardware timers. <a href="https://docs.embassy.dev/embassy-time">embassy_time</a> provides Instant, Duration and Timer types that are globally available and never overflow.
 
 - **Real-time ready** - 
 Tasks on the same async executor run cooperatively, but you can create multiple executors with different priorities, so that higher priority tasks preempt lower priority ones. See the <a href="https://github.com/embassy-rs/embassy/blob/master/examples/nrf/src/bin/multiprio.rs">example</a>.
@@ -31,7 +31,7 @@ The <a href="https://docs.embassy.dev/embassy-net/">embassy-net</a> network stac
 The <a href="https://github.com/embassy-rs/nrf-softdevice">nrf-softdevice</a> crate provides Bluetooth Low Energy 4.x and 5.x support for nRF52 microcontrollers.
 
 - **LoRa** - 
-<a href="https://docs.embassy.dev/embassy-lora/">embassy-lora</a> supports LoRa networking on STM32WL wireless microcontrollers and Semtech SX127x transceivers.
+<a href="https://docs.embassy.dev/embassy-lora/">embassy-lora</a> supports LoRa networking on STM32WL wireless microcontrollers and Semtech SX126x and SX127x transceivers.
 
 - **USB** - 
 <a href="https://docs.embassy.dev/embassy-usb/">embassy-usb</a> implements a device-side USB stack. Implementations for common classes such as USB serial (CDC ACM) and USB HID are available, and a rich builder API allows building your own.
@@ -42,15 +42,15 @@ The <a href="https://github.com/embassy-rs/nrf-softdevice">nrf-softdevice</a> cr
 
 ## Sneak peek
 
-```rust
+```rust,ignore
 use defmt::info;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
 use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pin, Pull};
 use embassy_nrf::Peripherals;
 
 // Declare async tasks
-#[embassy::task]
+#[embassy_executor::task]
 async fn blink(pin: AnyPin) {
     let mut led = Output::new(pin, Level::Low, OutputDrive::Standard);
 
@@ -64,8 +64,10 @@ async fn blink(pin: AnyPin) {
 }
 
 // Main is itself an async task as well.
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
+
     // Spawned tasks run in the background, concurrently.
     spawner.spawn(blink(p.P0_13.degrade())).unwrap();
 
@@ -93,20 +95,21 @@ Examples are found in the `examples/` folder seperated by the chip manufacturer 
 ### Running examples
 
 - Setup git submodules (needed for STM32 examples)
-```
+
+```bash
 git submodule init
 git submodule update
 ```
 
 - Install `probe-run` with defmt support.
 
-```
+```bash
 cargo install probe-run
 ```
 
 - Change directory to the sample's base directory. For example:
 
-```
+```bash
 cd examples/nrf
 ```
 
@@ -114,7 +117,7 @@ cd examples/nrf
 
 For example:
 
-```
+```bash
 cargo run --bin blinky
 ```
 
@@ -131,7 +134,7 @@ Embassy is guaranteed to compile on the latest stable Rust version at the time o
 
 Several features require nightly:
 
-- The `#[embassy::main]` and `#[embassy::task]` attribute macros.
+- The `#[embassy_executor::main]` and `#[embassy_executor::task]` attribute macros.
 - Async traits
 
 These are enabled by activating the `nightly` Cargo feature. If you do so, Embassy is guaranteed to compile on the exact nightly version specified in `rust-toolchain.toml`. It might compile with older or newer nightly versions, but that may change in any new patch release.
@@ -145,8 +148,8 @@ EMBedded ASYnc! :)
 This work is licensed under either of
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 

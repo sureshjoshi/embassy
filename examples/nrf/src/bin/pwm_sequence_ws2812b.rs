@@ -3,16 +3,12 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
+use embassy_executor::Spawner;
 use embassy_nrf::pwm::{
-    Config, Prescaler, SequenceConfig, SequenceLoad, SequencePwm, SingleSequenceMode,
-    SingleSequencer,
+    Config, Prescaler, SequenceConfig, SequenceLoad, SequencePwm, SingleSequenceMode, SingleSequencer,
 };
-use embassy_nrf::Peripherals;
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
 // WS2812B LED light demonstration. Drives just one light.
 // The following reference on WS2812B may be of use:
@@ -29,8 +25,9 @@ const RES: u16 = 0x8000;
 
 // Provides data to a WS2812b (Neopixel) LED and makes it go blue. The data
 // line is assumed to be P1_05.
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let mut config = Config::default();
     config.sequence_load = SequenceLoad::Common;
     config.prescaler = Prescaler::Div1;

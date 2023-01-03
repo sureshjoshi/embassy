@@ -1,31 +1,27 @@
 #![no_std]
 #![no_main]
-#![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 
 use core::mem;
+
 use defmt::{info, panic, unwrap};
-use embassy::executor::Spawner;
-use embassy::util::Forever;
-use embassy_nrf::pac;
-use embassy_nrf::usb::Driver;
-use embassy_nrf::Peripherals;
-use embassy_nrf::{interrupt, peripherals};
+use embassy_executor::Spawner;
+use embassy_nrf::usb::{Driver, PowerUsb};
+use embassy_nrf::{interrupt, pac, peripherals};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config, UsbDevice};
-use embassy_usb_serial::{CdcAcmClass, State};
+use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+type MyDriver = Driver<'static, peripherals::USBD, PowerUsb>;
 
-type MyDriver = Driver<'static, peripherals::USBD>;
-
-#[embassy::task]
+#[embassy_executor::task]
 async fn usb_task(mut device: UsbDevice<'static, MyDriver>) {
     device.run().await;
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn echo_task(mut class: CdcAcmClass<'static, MyDriver>) {
     loop {
         class.wait_connection().await;
@@ -35,22 +31,18 @@ async fn echo_task(mut class: CdcAcmClass<'static, MyDriver>) {
     }
 }
 
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let clock: pac::CLOCK = unsafe { mem::transmute(()) };
-    let power: pac::POWER = unsafe { mem::transmute(()) };
 
     info!("Enabling ext hfosc...");
     clock.tasks_hfclkstart.write(|w| unsafe { w.bits(1) });
     while clock.events_hfclkstarted.read().bits() != 1 {}
-
-    info!("Waiting for vbus...");
-    while !power.usbregstatus.read().vbusdetect().is_vbus_present() {}
-    info!("vbus OK");
-
     // Create the driver, from the HAL.
     let irq = interrupt::take!(USBD);
-    let driver = Driver::new(p.USBD, irq);
+    let power_irq = interrupt::take!(POWER_CLOCK);
+    let driver = Driver::new(p.USBD, irq, PowerUsb::new(power_irq));
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -74,8 +66,8 @@ async fn main(spawner: Spawner, p: Peripherals) {
         control_buf: [u8; 64],
         serial_state: State<'static>,
     }
-    static RESOURCES: Forever<Resources> = Forever::new();
-    let res = RESOURCES.put(Resources {
+    static RESOURCES: StaticCell<Resources> = StaticCell::new();
+    let res = RESOURCES.init(Resources {
         device_descriptor: [0; 256],
         config_descriptor: [0; 256],
         bos_descriptor: [0; 256],

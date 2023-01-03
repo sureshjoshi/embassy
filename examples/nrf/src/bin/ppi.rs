@@ -3,19 +3,18 @@
 #![feature(type_alias_impl_trait)]
 
 use core::future::pending;
+
 use defmt::info;
-use embassy::executor::Spawner;
+use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::gpiote::{self, InputChannel, InputChannelPolarity};
 use embassy_nrf::ppi::Ppi;
-use embassy_nrf::Peripherals;
 use gpiote::{OutputChannel, OutputChannelPolarity};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     info!("Starting!");
 
     let button1 = InputChannel::new(
@@ -60,12 +59,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     let mut ppi = Ppi::new_one_to_one(p.PPI_CH2, button3.event_in(), led1.task_set());
     ppi.enable();
 
-    let mut ppi = Ppi::new_one_to_two(
-        p.PPI_CH3,
-        button4.event_in(),
-        led1.task_out(),
-        led2.task_out(),
-    );
+    let mut ppi = Ppi::new_one_to_two(p.PPI_CH3, button4.event_in(), led1.task_out(), led2.task_out());
     ppi.enable();
 
     info!("PPI setup!");

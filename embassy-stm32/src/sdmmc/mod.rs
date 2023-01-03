@@ -1,25 +1,25 @@
 #![macro_use]
 
 use core::default::Default;
-use core::marker::PhantomData;
+use core::future::poll_fn;
 use core::task::Poll;
 
-use embassy::interrupt::InterruptExt;
-use embassy::util::Unborrow;
-use embassy::waitqueue::AtomicWaker;
 use embassy_hal_common::drop::OnDrop;
-use embassy_hal_common::unborrow;
-use futures::future::poll_fn;
+use embassy_hal_common::{into_ref, PeripheralRef};
+use embassy_sync::waitqueue::AtomicWaker;
 use sdio_host::{BusWidth, CardCapacity, CardStatus, CurrentState, SDStatus, CID, CSD, OCR, SCR};
 
 use crate::dma::NoDma;
-use crate::gpio::sealed::AFType;
-use crate::gpio::{Pull, Speed};
-use crate::interrupt::Interrupt;
+use crate::gpio::sealed::{AFType, Pin};
+use crate::gpio::{AnyPin, Pull, Speed};
+use crate::interrupt::{Interrupt, InterruptExt};
 use crate::pac::sdmmc::Sdmmc as RegBlock;
-use crate::peripherals;
 use crate::rcc::RccPeripheral;
 use crate::time::Hertz;
+use crate::{peripherals, Peripheral};
+
+/// Frequency used for SD Card initialization. Must be no higher than 400 kHz.
+const SD_INIT_FREQ: Hertz = Hertz(400_000);
 
 /// The signalling scheme used on the SDMMC bus
 #[non_exhaustive]
@@ -178,12 +178,19 @@ impl Default for Config {
 }
 
 /// Sdmmc device
-pub struct Sdmmc<'d, T: Instance, P: Pins<T>, Dma = NoDma> {
-    sdmmc: PhantomData<&'d mut T>,
-    pins: P,
-    irq: T::Interrupt,
+pub struct Sdmmc<'d, T: Instance, Dma = NoDma> {
+    _peri: PeripheralRef<'d, T>,
+    irq: PeripheralRef<'d, T::Interrupt>,
+    dma: PeripheralRef<'d, Dma>,
+
+    clk: PeripheralRef<'d, AnyPin>,
+    cmd: PeripheralRef<'d, AnyPin>,
+    d0: PeripheralRef<'d, AnyPin>,
+    d1: Option<PeripheralRef<'d, AnyPin>>,
+    d2: Option<PeripheralRef<'d, AnyPin>>,
+    d3: Option<PeripheralRef<'d, AnyPin>>,
+
     config: Config,
-    dma: Dma,
     /// Current clock to card
     clock: Hertz,
     /// Current signalling scheme to card
@@ -193,34 +200,124 @@ pub struct Sdmmc<'d, T: Instance, P: Pins<T>, Dma = NoDma> {
 }
 
 #[cfg(sdmmc_v1)]
-impl<'d, T: Instance, P: Pins<T>, Dma: SdmmcDma<T>> Sdmmc<'d, T, P, Dma> {
-    pub fn new(
-        _peripheral: impl Unborrow<Target = T> + 'd,
-        pins: impl Unborrow<Target = P> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
+impl<'d, T: Instance, Dma: SdmmcDma<T>> Sdmmc<'d, T, Dma> {
+    pub fn new_1bit(
+        sdmmc: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        clk: impl Peripheral<P = impl CkPin<T>> + 'd,
+        cmd: impl Peripheral<P = impl CmdPin<T>> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
         config: Config,
-        dma: impl Unborrow<Target = Dma> + 'd,
     ) -> Self {
-        unborrow!(irq, pins, dma);
-        pins.configure();
+        into_ref!(clk, cmd, d0);
+
+        critical_section::with(|_| unsafe {
+            clk.set_as_af_pull(clk.af_num(), AFType::OutputPushPull, Pull::None);
+            cmd.set_as_af_pull(cmd.af_num(), AFType::OutputPushPull, Pull::Up);
+            d0.set_as_af_pull(d0.af_num(), AFType::OutputPushPull, Pull::Up);
+
+            clk.set_speed(Speed::VeryHigh);
+            cmd.set_speed(Speed::VeryHigh);
+            d0.set_speed(Speed::VeryHigh);
+        });
+
+        Self::new_inner(
+            sdmmc,
+            irq,
+            dma,
+            clk.map_into(),
+            cmd.map_into(),
+            d0.map_into(),
+            None,
+            None,
+            None,
+            config,
+        )
+    }
+
+    pub fn new_4bit(
+        sdmmc: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        clk: impl Peripheral<P = impl CkPin<T>> + 'd,
+        cmd: impl Peripheral<P = impl CmdPin<T>> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        config: Config,
+    ) -> Self {
+        into_ref!(clk, cmd, d0, d1, d2, d3);
+
+        critical_section::with(|_| unsafe {
+            clk.set_as_af_pull(clk.af_num(), AFType::OutputPushPull, Pull::None);
+            cmd.set_as_af_pull(cmd.af_num(), AFType::OutputPushPull, Pull::Up);
+            d0.set_as_af_pull(d0.af_num(), AFType::OutputPushPull, Pull::Up);
+            d1.set_as_af_pull(d1.af_num(), AFType::OutputPushPull, Pull::Up);
+            d2.set_as_af_pull(d2.af_num(), AFType::OutputPushPull, Pull::Up);
+            d3.set_as_af_pull(d3.af_num(), AFType::OutputPushPull, Pull::Up);
+
+            clk.set_speed(Speed::VeryHigh);
+            cmd.set_speed(Speed::VeryHigh);
+            d0.set_speed(Speed::VeryHigh);
+            d1.set_speed(Speed::VeryHigh);
+            d2.set_speed(Speed::VeryHigh);
+            d3.set_speed(Speed::VeryHigh);
+        });
+
+        Self::new_inner(
+            sdmmc,
+            irq,
+            dma,
+            clk.map_into(),
+            cmd.map_into(),
+            d0.map_into(),
+            Some(d1.map_into()),
+            Some(d2.map_into()),
+            Some(d3.map_into()),
+            config,
+        )
+    }
+
+    fn new_inner(
+        sdmmc: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        dma: impl Peripheral<P = Dma> + 'd,
+        clk: PeripheralRef<'d, AnyPin>,
+        cmd: PeripheralRef<'d, AnyPin>,
+        d0: PeripheralRef<'d, AnyPin>,
+        d1: Option<PeripheralRef<'d, AnyPin>>,
+        d2: Option<PeripheralRef<'d, AnyPin>>,
+        d3: Option<PeripheralRef<'d, AnyPin>>,
+        config: Config,
+    ) -> Self {
+        into_ref!(sdmmc, irq, dma);
 
         T::enable();
         T::reset();
 
         let inner = T::inner();
-        let clock = unsafe { inner.new_inner(T::frequency()) };
+        unsafe { inner.new_inner() };
 
         irq.set_handler(Self::on_interrupt);
         irq.unpend();
         irq.enable();
 
         Self {
-            sdmmc: PhantomData,
-            pins,
+            _peri: sdmmc,
             irq,
-            config,
             dma,
-            clock,
+
+            clk,
+            cmd,
+            d0,
+            d1,
+            d2,
+            d3,
+
+            config,
+            clock: SD_INIT_FREQ,
             signalling: Default::default(),
             card: None,
         }
@@ -228,66 +325,153 @@ impl<'d, T: Instance, P: Pins<T>, Dma: SdmmcDma<T>> Sdmmc<'d, T, P, Dma> {
 }
 
 #[cfg(sdmmc_v2)]
-impl<'d, T: Instance, P: Pins<T>> Sdmmc<'d, T, P, NoDma> {
-    pub fn new(
-        _peripheral: impl Unborrow<Target = T> + 'd,
-        pins: impl Unborrow<Target = P> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
+impl<'d, T: Instance> Sdmmc<'d, T, NoDma> {
+    pub fn new_1bit(
+        sdmmc: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        clk: impl Peripheral<P = impl CkPin<T>> + 'd,
+        cmd: impl Peripheral<P = impl CmdPin<T>> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(irq, pins);
-        pins.configure();
+        into_ref!(clk, cmd, d0);
+
+        critical_section::with(|_| unsafe {
+            clk.set_as_af_pull(clk.af_num(), AFType::OutputPushPull, Pull::None);
+            cmd.set_as_af_pull(cmd.af_num(), AFType::OutputPushPull, Pull::Up);
+            d0.set_as_af_pull(d0.af_num(), AFType::OutputPushPull, Pull::Up);
+
+            clk.set_speed(Speed::VeryHigh);
+            cmd.set_speed(Speed::VeryHigh);
+            d0.set_speed(Speed::VeryHigh);
+        });
+
+        Self::new_inner(
+            sdmmc,
+            irq,
+            clk.map_into(),
+            cmd.map_into(),
+            d0.map_into(),
+            None,
+            None,
+            None,
+            config,
+        )
+    }
+
+    pub fn new_4bit(
+        sdmmc: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        clk: impl Peripheral<P = impl CkPin<T>> + 'd,
+        cmd: impl Peripheral<P = impl CmdPin<T>> + 'd,
+        d0: impl Peripheral<P = impl D0Pin<T>> + 'd,
+        d1: impl Peripheral<P = impl D1Pin<T>> + 'd,
+        d2: impl Peripheral<P = impl D2Pin<T>> + 'd,
+        d3: impl Peripheral<P = impl D3Pin<T>> + 'd,
+        config: Config,
+    ) -> Self {
+        into_ref!(clk, cmd, d0, d1, d2, d3);
+
+        critical_section::with(|_| unsafe {
+            clk.set_as_af_pull(clk.af_num(), AFType::OutputPushPull, Pull::None);
+            cmd.set_as_af_pull(cmd.af_num(), AFType::OutputPushPull, Pull::Up);
+            d0.set_as_af_pull(d0.af_num(), AFType::OutputPushPull, Pull::Up);
+            d1.set_as_af_pull(d1.af_num(), AFType::OutputPushPull, Pull::Up);
+            d2.set_as_af_pull(d2.af_num(), AFType::OutputPushPull, Pull::Up);
+            d3.set_as_af_pull(d3.af_num(), AFType::OutputPushPull, Pull::Up);
+
+            clk.set_speed(Speed::VeryHigh);
+            cmd.set_speed(Speed::VeryHigh);
+            d0.set_speed(Speed::VeryHigh);
+            d1.set_speed(Speed::VeryHigh);
+            d2.set_speed(Speed::VeryHigh);
+            d3.set_speed(Speed::VeryHigh);
+        });
+
+        Self::new_inner(
+            sdmmc,
+            irq,
+            clk.map_into(),
+            cmd.map_into(),
+            d0.map_into(),
+            Some(d1.map_into()),
+            Some(d2.map_into()),
+            Some(d3.map_into()),
+            config,
+        )
+    }
+
+    fn new_inner(
+        sdmmc: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        clk: PeripheralRef<'d, AnyPin>,
+        cmd: PeripheralRef<'d, AnyPin>,
+        d0: PeripheralRef<'d, AnyPin>,
+        d1: Option<PeripheralRef<'d, AnyPin>>,
+        d2: Option<PeripheralRef<'d, AnyPin>>,
+        d3: Option<PeripheralRef<'d, AnyPin>>,
+        config: Config,
+    ) -> Self {
+        into_ref!(sdmmc, irq);
 
         T::enable();
         T::reset();
 
         let inner = T::inner();
-        let clock = unsafe { inner.new_inner(T::frequency()) };
+        unsafe { inner.new_inner() };
 
         irq.set_handler(Self::on_interrupt);
         irq.unpend();
         irq.enable();
 
         Self {
-            sdmmc: PhantomData,
-            pins,
+            _peri: sdmmc,
             irq,
+            dma: NoDma.into_ref(),
+
+            clk,
+            cmd,
+            d0,
+            d1,
+            d2,
+            d3,
+
             config,
-            dma: NoDma,
-            clock,
+            clock: SD_INIT_FREQ,
             signalling: Default::default(),
             card: None,
         }
     }
 }
 
-impl<'d, T: Instance, P: Pins<T>, Dma: SdmmcDma<T>> Sdmmc<'d, T, P, Dma> {
+impl<'d, T: Instance, Dma: SdmmcDma<T>> Sdmmc<'d, T, Dma> {
     #[inline(always)]
-    pub async fn init_card(&mut self, freq: impl Into<Hertz>) -> Result<(), Error> {
+    pub async fn init_card(&mut self, freq: Hertz) -> Result<(), Error> {
         let inner = T::inner();
         let freq = freq.into();
+
+        let bus_width = match self.d3.is_some() {
+            true => BusWidth::Four,
+            false => BusWidth::One,
+        };
 
         inner
             .init_card(
                 freq,
-                P::BUSWIDTH,
+                bus_width,
                 &mut self.card,
                 &mut self.signalling,
                 T::frequency(),
                 &mut self.clock,
                 T::state(),
                 self.config.data_transfer_timeout,
-                &mut self.dma,
+                &mut *self.dma,
             )
             .await
     }
 
     #[inline(always)]
-    pub async fn read_block(
-        &mut self,
-        block_idx: u32,
-        buffer: &mut DataBlock,
-    ) -> Result<(), Error> {
+    pub async fn read_block(&mut self, block_idx: u32, buffer: &mut DataBlock) -> Result<(), Error> {
         let card_capacity = self.card()?.card_type;
         let inner = T::inner();
         let state = T::state();
@@ -301,7 +485,7 @@ impl<'d, T: Instance, P: Pins<T>, Dma: SdmmcDma<T>> Sdmmc<'d, T, P, Dma> {
                 card_capacity,
                 state,
                 self.config.data_transfer_timeout,
-                &mut self.dma,
+                &mut *self.dma,
             )
             .await
     }
@@ -320,7 +504,7 @@ impl<'d, T: Instance, P: Pins<T>, Dma: SdmmcDma<T>> Sdmmc<'d, T, P, Dma> {
                 card,
                 state,
                 self.config.data_transfer_timeout,
-                &mut self.dma,
+                &mut *self.dma,
             )
             .await
     }
@@ -351,12 +535,26 @@ impl<'d, T: Instance, P: Pins<T>, Dma: SdmmcDma<T>> Sdmmc<'d, T, P, Dma> {
     }
 }
 
-impl<'d, T: Instance, P: Pins<T>, Dma> Drop for Sdmmc<'d, T, P, Dma> {
+impl<'d, T: Instance, Dma> Drop for Sdmmc<'d, T, Dma> {
     fn drop(&mut self) {
         self.irq.disable();
         let inner = T::inner();
         unsafe { inner.on_drop() };
-        self.pins.deconfigure();
+
+        critical_section::with(|_| unsafe {
+            self.clk.set_as_disconnected();
+            self.cmd.set_as_disconnected();
+            self.d0.set_as_disconnected();
+            if let Some(x) = &mut self.d1 {
+                x.set_as_disconnected();
+            }
+            if let Some(x) = &mut self.d2 {
+                x.set_as_disconnected();
+            }
+            if let Some(x) = &mut self.d3 {
+                x.set_as_disconnected();
+            }
+        });
     }
 }
 
@@ -366,16 +564,10 @@ impl SdmmcInner {
     /// # Safety
     ///
     /// Access to `regs` registers should be exclusive
-    unsafe fn new_inner(&self, kernel_clk: Hertz) -> Hertz {
+    unsafe fn new_inner(&self) {
         let regs = self.0;
 
-        // While the SD/SDIO card or eMMC is in identification mode,
-        // the SDMMC_CK frequency must be less than 400 kHz.
-        let (clkdiv, clock) = unwrap!(clk_div(kernel_clk, 400_000));
-
         regs.clkcr().write(|w| {
-            w.set_widbus(0);
-            w.set_clkdiv(clkdiv);
             w.set_pwrsav(false);
             w.set_negedge(false);
             w.set_hwfc_en(true);
@@ -387,8 +579,6 @@ impl SdmmcInner {
         // Power off, writen 00: Clock to the card is stopped;
         // D[7:0], CMD, and CK are driven high.
         regs.power().modify(|w| w.set_pwrctrl(PowerCtrl::Off as u8));
-
-        clock
     }
 
     /// Initializes card (if present) and sets the bus at the
@@ -410,6 +600,19 @@ impl SdmmcInner {
 
         // NOTE(unsafe) We have exclusive access to the peripheral
         unsafe {
+            // While the SD/SDIO card or eMMC is in identification mode,
+            // the SDMMC_CK frequency must be no more than 400 kHz.
+            let (clkdiv, init_clock) = unwrap!(clk_div(ker_ck, SD_INIT_FREQ.0));
+            *clock = init_clock;
+
+            // CPSMACT and DPSMACT must be 0 to set WIDBUS
+            self.wait_idle();
+
+            regs.clkcr().modify(|w| {
+                w.set_widbus(0);
+                w.set_clkdiv(clkdiv);
+            });
+
             regs.power().modify(|w| w.set_pwrctrl(PowerCtrl::On as u8));
             self.cmd(Cmd::idle(), false)?;
 
@@ -475,8 +678,7 @@ impl SdmmcInner {
 
             self.select_card(Some(&card))?;
 
-            self.get_scr(&mut card, waker_reg, data_transfer_timeout, dma)
-                .await?;
+            self.get_scr(&mut card, waker_reg, data_transfer_timeout, dma).await?;
 
             // Set bus width
             let (width, acmd_arg) = match bus_width {
@@ -515,12 +717,7 @@ impl SdmmcInner {
             if freq.0 > 25_000_000 {
                 // Switch to SDR25
                 *signalling = self
-                    .switch_signalling_mode(
-                        Signalling::SDR25,
-                        waker_reg,
-                        data_transfer_timeout,
-                        dma,
-                    )
+                    .switch_signalling_mode(Signalling::SDR25, waker_reg, data_transfer_timeout, dma)
                     .await?;
 
                 if *signalling == Signalling::SDR25 {
@@ -562,13 +759,7 @@ impl SdmmcInner {
         let on_drop = OnDrop::new(|| unsafe { self.on_drop() });
 
         unsafe {
-            self.prepare_datapath_read(
-                buffer as *mut [u32; 128],
-                512,
-                9,
-                data_transfer_timeout,
-                dma,
-            );
+            self.prepare_datapath_read(buffer as *mut [u32; 128], 512, 9, data_transfer_timeout, dma);
             self.data_interrupts(true);
         }
         self.cmd(Cmd::read_single_block(address), true)?;
@@ -617,13 +808,7 @@ impl SdmmcInner {
         let on_drop = OnDrop::new(|| unsafe { self.on_drop() });
 
         unsafe {
-            self.prepare_datapath_write(
-                buffer as *const [u32; 128],
-                512,
-                9,
-                data_transfer_timeout,
-                dma,
-            );
+            self.prepare_datapath_write(buffer as *const [u32; 128], 512, 9, data_transfer_timeout, dma);
             self.data_interrupts(true);
         }
         self.cmd(Cmd::write_single_block(address), true)?;
@@ -654,10 +839,7 @@ impl SdmmcInner {
 
                 // Try to read card status (ACMD13)
                 while timeout > 0 {
-                    match self
-                        .read_sd_status(card, waker_reg, data_transfer_timeout, dma)
-                        .await
-                    {
+                    match self.read_sd_status(card, waker_reg, data_transfer_timeout, dma).await {
                         Ok(_) => return Ok(()),
                         Err(Error::Timeout) => (), // Try again
                         Err(e) => return Err(e),
@@ -732,8 +914,7 @@ impl SdmmcInner {
 
         // NOTE(unsafe) We have exclusive access to the regisers
 
-        regs.dtimer()
-            .write(|w| w.set_datatime(data_transfer_timeout));
+        regs.dtimer().write(|w| w.set_datatime(data_transfer_timeout));
         regs.dlenr().write(|w| w.set_datalength(length_bytes));
 
         cfg_if::cfg_if! {
@@ -781,8 +962,7 @@ impl SdmmcInner {
 
         // NOTE(unsafe) We have exclusive access to the regisers
 
-        regs.dtimer()
-            .write(|w| w.set_datatime(data_transfer_timeout));
+        regs.dtimer().write(|w| w.set_datatime(data_transfer_timeout));
         regs.dlenr().write(|w| w.set_datalength(length_bytes));
 
         cfg_if::cfg_if! {
@@ -824,19 +1004,20 @@ impl SdmmcInner {
     }
 
     /// Sets the CLKDIV field in CLKCR. Updates clock field in self
-    fn clkcr_set_clkdiv(
-        &self,
-        freq: u32,
-        width: BusWidth,
-        ker_ck: Hertz,
-        clock: &mut Hertz,
-    ) -> Result<(), Error> {
+    fn clkcr_set_clkdiv(&self, freq: u32, width: BusWidth, ker_ck: Hertz, clock: &mut Hertz) -> Result<(), Error> {
         let regs = self.0;
+
+        let width_u32 = match width {
+            BusWidth::One => 1u32,
+            BusWidth::Four => 4u32,
+            BusWidth::Eight => 8u32,
+            _ => panic!("Invalid Bus Width"),
+        };
 
         let (clkdiv, new_clock) = clk_div(ker_ck, freq)?;
         // Enforce AHB and SDMMC_CK clock relation. See RM0433 Rev 7
         // Section 55.5.8
-        let sdmmc_bus_bandwidth = new_clock.0 * (width as u32);
+        let sdmmc_bus_bandwidth = new_clock.0 * width_u32;
         assert!(ker_ck.0 > 3 * sdmmc_bus_bandwidth / 32);
         *clock = new_clock;
 
@@ -882,13 +1063,7 @@ impl SdmmcInner {
         let on_drop = OnDrop::new(|| unsafe { self.on_drop() });
 
         unsafe {
-            self.prepare_datapath_read(
-                &mut status as *mut [u32; 16],
-                64,
-                6,
-                data_transfer_timeout,
-                dma,
-            );
+            self.prepare_datapath_read(&mut status as *mut [u32; 16], 64, 6, data_transfer_timeout, dma);
             self.data_interrupts(true);
         }
         self.cmd(Cmd::cmd6(set_function), true)?; // CMD6
@@ -970,13 +1145,7 @@ impl SdmmcInner {
         let on_drop = OnDrop::new(|| unsafe { self.on_drop() });
 
         unsafe {
-            self.prepare_datapath_read(
-                &mut status as *mut [u32; 16],
-                64,
-                6,
-                data_transfer_timeout,
-                dma,
-            );
+            self.prepare_datapath_read(&mut status as *mut [u32; 16], 64, 6, data_transfer_timeout, dma);
             self.data_interrupts(true);
         }
         self.cmd(Cmd::card_status(0), true)?;
@@ -1343,114 +1512,6 @@ cfg_if::cfg_if! {
     }
 }
 
-pub trait Pins<T: Instance>: sealed::Pins<T> + 'static {
-    const BUSWIDTH: BusWidth;
-
-    fn configure(&mut self);
-    fn deconfigure(&mut self);
-}
-
-impl<T, CLK, CMD, D0, D1, D2, D3> sealed::Pins<T> for (CLK, CMD, D0, D1, D2, D3)
-where
-    T: Instance,
-    CLK: CkPin<T>,
-    CMD: CmdPin<T>,
-    D0: D0Pin<T>,
-    D1: D1Pin<T>,
-    D2: D2Pin<T>,
-    D3: D3Pin<T>,
-{
-}
-
-impl<T, CLK, CMD, D0> sealed::Pins<T> for (CLK, CMD, D0)
-where
-    T: Instance,
-    CLK: CkPin<T>,
-    CMD: CmdPin<T>,
-    D0: D0Pin<T>,
-{
-}
-
-impl<T, CLK, CMD, D0, D1, D2, D3> Pins<T> for (CLK, CMD, D0, D1, D2, D3)
-where
-    T: Instance,
-    CLK: CkPin<T>,
-    CMD: CmdPin<T>,
-    D0: D0Pin<T>,
-    D1: D1Pin<T>,
-    D2: D2Pin<T>,
-    D3: D3Pin<T>,
-{
-    const BUSWIDTH: BusWidth = BusWidth::Four;
-
-    fn configure(&mut self) {
-        let (clk_pin, cmd_pin, d0_pin, d1_pin, d2_pin, d3_pin) = self;
-
-        critical_section::with(|_| unsafe {
-            clk_pin.set_as_af_pull(clk_pin.af_num(), AFType::OutputPushPull, Pull::None);
-            cmd_pin.set_as_af_pull(cmd_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-            d0_pin.set_as_af_pull(d0_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-            d1_pin.set_as_af_pull(d1_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-            d2_pin.set_as_af_pull(d2_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-            d3_pin.set_as_af_pull(d3_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-
-            clk_pin.set_speed(Speed::VeryHigh);
-            cmd_pin.set_speed(Speed::VeryHigh);
-            d0_pin.set_speed(Speed::VeryHigh);
-            d1_pin.set_speed(Speed::VeryHigh);
-            d2_pin.set_speed(Speed::VeryHigh);
-            d3_pin.set_speed(Speed::VeryHigh);
-        });
-    }
-
-    fn deconfigure(&mut self) {
-        let (clk_pin, cmd_pin, d0_pin, d1_pin, d2_pin, d3_pin) = self;
-
-        critical_section::with(|_| unsafe {
-            clk_pin.set_as_disconnected();
-            cmd_pin.set_as_disconnected();
-            d0_pin.set_as_disconnected();
-            d1_pin.set_as_disconnected();
-            d2_pin.set_as_disconnected();
-            d3_pin.set_as_disconnected();
-        });
-    }
-}
-
-impl<T, CLK, CMD, D0> Pins<T> for (CLK, CMD, D0)
-where
-    T: Instance,
-    CLK: CkPin<T>,
-    CMD: CmdPin<T>,
-    D0: D0Pin<T>,
-{
-    const BUSWIDTH: BusWidth = BusWidth::One;
-
-    fn configure(&mut self) {
-        let (clk_pin, cmd_pin, d0_pin) = self;
-
-        critical_section::with(|_| unsafe {
-            clk_pin.set_as_af_pull(clk_pin.af_num(), AFType::OutputPushPull, Pull::None);
-            cmd_pin.set_as_af_pull(cmd_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-            d0_pin.set_as_af_pull(d0_pin.af_num(), AFType::OutputPushPull, Pull::Up);
-
-            clk_pin.set_speed(Speed::VeryHigh);
-            cmd_pin.set_speed(Speed::VeryHigh);
-            d0_pin.set_speed(Speed::VeryHigh);
-        });
-    }
-
-    fn deconfigure(&mut self) {
-        let (clk_pin, cmd_pin, d0_pin) = self;
-
-        critical_section::with(|_| unsafe {
-            clk_pin.set_as_disconnected();
-            cmd_pin.set_as_disconnected();
-            d0_pin.set_as_disconnected();
-        });
-    }
-}
-
 foreach_peripheral!(
     (sdmmc, $inst:ident) => {
         impl sealed::Instance for peripherals::$inst {
@@ -1461,8 +1522,8 @@ foreach_peripheral!(
                 INNER
             }
 
-            fn state() -> &'static ::embassy::waitqueue::AtomicWaker {
-                static WAKER: ::embassy::waitqueue::AtomicWaker = ::embassy::waitqueue::AtomicWaker::new();
+            fn state() -> &'static ::embassy_sync::waitqueue::AtomicWaker {
+                static WAKER: ::embassy_sync::waitqueue::AtomicWaker = ::embassy_sync::waitqueue::AtomicWaker::new();
                 &WAKER
             }
         }
@@ -1473,20 +1534,22 @@ foreach_peripheral!(
 
 #[cfg(feature = "sdmmc-rs")]
 mod sdmmc_rs {
-    use super::*;
     use core::future::Future;
+
     use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
+
+    use super::*;
 
     impl<'d, T: Instance, P: Pins<T>> BlockDevice for Sdmmc<'d, T, P> {
         type Error = Error;
-        type ReadFuture<'a>
+
+        type ReadFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a
         where
-            Self: 'a,
-        = impl Future<Output = Result<(), Self::Error>> + 'a;
-        type WriteFuture<'a>
+            Self: 'a;
+
+        type WriteFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a
         where
-            Self: 'a,
-        = impl Future<Output = Result<(), Self::Error>> + 'a;
+            Self: 'a;
 
         fn read<'a>(
             &'a mut self,
@@ -1506,13 +1569,7 @@ mod sdmmc_rs {
                     // NOTE(unsafe) Block uses align(4)
                     let buf = unsafe { &mut *(block as *mut [u8; 512] as *mut [u32; 128]) };
                     inner
-                        .read_block(
-                            address,
-                            buf,
-                            card_capacity,
-                            state,
-                            self.config.data_transfer_timeout,
-                        )
+                        .read_block(address, buf, card_capacity, state, self.config.data_transfer_timeout)
                         .await?;
                     address += 1;
                 }
@@ -1520,11 +1577,7 @@ mod sdmmc_rs {
             }
         }
 
-        fn write<'a>(
-            &'a mut self,
-            blocks: &'a [Block],
-            start_block_idx: BlockIdx,
-        ) -> Self::WriteFuture<'a> {
+        fn write<'a>(&'a mut self, blocks: &'a [Block], start_block_idx: BlockIdx) -> Self::WriteFuture<'a> {
             async move {
                 let card = self.card.as_mut().ok_or(Error::NoCard)?;
                 let inner = T::inner();

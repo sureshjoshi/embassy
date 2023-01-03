@@ -59,16 +59,14 @@
 
 use cortex_m_rt::entry;
 use defmt::{info, unwrap};
-use embassy::executor::{Executor, InterruptExecutor};
-use embassy::interrupt::InterruptExt;
-use embassy::time::{Duration, Instant, Timer};
-use embassy::util::Forever;
+use embassy_nrf::executor::{Executor, InterruptExecutor};
 use embassy_nrf::interrupt;
+use embassy_nrf::interrupt::InterruptExt;
+use embassy_time::{Duration, Instant, Timer};
+use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::task]
+#[embassy_executor::task]
 async fn run_high() {
     loop {
         info!("        [high] tick!");
@@ -76,7 +74,7 @@ async fn run_high() {
     }
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn run_med() {
     loop {
         let start = Instant::now();
@@ -93,7 +91,7 @@ async fn run_med() {
     }
 }
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn run_low() {
     loop {
         let start = Instant::now();
@@ -110,9 +108,9 @@ async fn run_low() {
     }
 }
 
-static EXECUTOR_HIGH: Forever<InterruptExecutor<interrupt::SWI1_EGU1>> = Forever::new();
-static EXECUTOR_MED: Forever<InterruptExecutor<interrupt::SWI0_EGU0>> = Forever::new();
-static EXECUTOR_LOW: Forever<Executor> = Forever::new();
+static EXECUTOR_HIGH: StaticCell<InterruptExecutor<interrupt::SWI1_EGU1>> = StaticCell::new();
+static EXECUTOR_MED: StaticCell<InterruptExecutor<interrupt::SWI0_EGU0>> = StaticCell::new();
+static EXECUTOR_LOW: StaticCell<Executor> = StaticCell::new();
 
 #[entry]
 fn main() -> ! {
@@ -123,19 +121,19 @@ fn main() -> ! {
     // High-priority executor: SWI1_EGU1, priority level 6
     let irq = interrupt::take!(SWI1_EGU1);
     irq.set_priority(interrupt::Priority::P6);
-    let executor = EXECUTOR_HIGH.put(InterruptExecutor::new(irq));
+    let executor = EXECUTOR_HIGH.init(InterruptExecutor::new(irq));
     let spawner = executor.start();
     unwrap!(spawner.spawn(run_high()));
 
     // Medium-priority executor: SWI0_EGU0, priority level 7
     let irq = interrupt::take!(SWI0_EGU0);
     irq.set_priority(interrupt::Priority::P7);
-    let executor = EXECUTOR_MED.put(InterruptExecutor::new(irq));
+    let executor = EXECUTOR_MED.init(InterruptExecutor::new(irq));
     let spawner = executor.start();
     unwrap!(spawner.spawn(run_med()));
 
     // Low priority executor: runs in thread mode, using WFE/SEV
-    let executor = EXECUTOR_LOW.put(Executor::new());
+    let executor = EXECUTOR_LOW.init(Executor::new());
     executor.run(|spawner| {
         unwrap!(spawner.spawn(run_low()));
     });

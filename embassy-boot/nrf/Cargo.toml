@@ -1,20 +1,25 @@
 [package]
-authors = [
-    "Ulf Lilleengen <lulf@redhat.com>",
-]
-edition = "2018"
+edition = "2021"
 name = "embassy-boot-nrf"
 version = "0.1.0"
-description = "Bootloader for nRF chips"
+description = "Bootloader lib for nRF chips"
+license = "MIT OR Apache-2.0"
+
+[package.metadata.embassy_docs]
+src_base = "https://github.com/embassy-rs/embassy/blob/embassy-boot-nrf-v$VERSION/embassy-boot/nrf/src/"
+src_base_git = "https://github.com/embassy-rs/embassy/blob/$COMMIT/embassy-boot/nrf/src/"
+features = ["embassy-nrf/nrf52840"]
+target = "thumbv7em-none-eabi"
+
+[lib]
 
 [dependencies]
 defmt = { version = "0.3", optional = true }
-defmt-rtt = { version = "0.3", optional = true }
 
-embassy = { path = "../../embassy", default-features = false }
+embassy-sync = { path = "../../embassy-sync" }
 embassy-nrf = { path = "../../embassy-nrf", default-features = false, features = ["nightly"] }
 embassy-boot = { path = "../boot", default-features = false }
-cortex-m = { version = "0.7" }
+cortex-m = { version = "0.7.6" }
 cortex-m-rt = { version = "0.7" }
 embedded-storage = "0.3.0"
 embedded-storage-async = "0.3.0"
@@ -31,35 +36,3 @@ defmt = [
 softdevice = [
     "nrf-softdevice-mbr",
 ]
-debug = ["defmt-rtt"]
-
-[profile.dev]
-debug = 2
-debug-assertions = true
-incremental = false
-opt-level = 'z'
-overflow-checks = true
-
-[profile.release]
-codegen-units = 1
-debug = 2
-debug-assertions = false
-incremental = false
-lto = 'fat'
-opt-level = 'z'
-overflow-checks = false
-
-# do not optimize proc-macro crates = faster builds from scratch
-[profile.dev.build-override]
-codegen-units = 8
-debug = false
-debug-assertions = false
-opt-level = 0
-overflow-checks = false
-
-[profile.release.build-override]
-codegen-units = 8
-debug = false
-debug-assertions = false
-opt-level = 0
-overflow-checks = false

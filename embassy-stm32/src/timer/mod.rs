@@ -1,8 +1,9 @@
-use embassy::interrupt::Interrupt;
-
-use crate::rcc::{sealed::RccPeripheral as __RccPeri, RccPeripheral};
-use crate::time::Hertz;
 use stm32_metapac::timer::vals;
+
+use crate::interrupt::Interrupt;
+use crate::rcc::sealed::RccPeripheral as __RccPeri;
+use crate::rcc::RccPeripheral;
+use crate::time::Hertz;
 
 #[cfg(feature = "unstable-pac")]
 pub mod low_level {
@@ -22,7 +23,7 @@ pub(crate) mod sealed {
 
         fn reset(&mut self);
 
-        fn set_frequency<F: Into<Hertz>>(&mut self, frequency: F);
+        fn set_frequency(&mut self, frequency: Hertz);
 
         fn clear_update_interrupt(&mut self) -> bool;
 
@@ -36,10 +37,10 @@ pub(crate) mod sealed {
     pub trait GeneralPurpose32bitInstance: GeneralPurpose16bitInstance {
         fn regs_gp32() -> crate::pac::timer::TimGp32;
 
-        fn set_frequency<F: Into<Hertz>>(&mut self, frequency: F);
+        fn set_frequency(&mut self, frequency: Hertz);
     }
 
-    pub trait AdvancedControlInstance: Basic16bitInstance {
+    pub trait AdvancedControlInstance: GeneralPurpose16bitInstance {
         fn regs_advanced() -> crate::pac::timer::TimAdv;
     }
 }
@@ -80,14 +81,13 @@ macro_rules! impl_basic_16bit_timer {
                 }
             }
 
-            fn set_frequency<F: Into<Hertz>>(&mut self, frequency: F) {
+            fn set_frequency(&mut self, frequency: Hertz) {
                 use core::convert::TryInto;
-                let f = frequency.into().0;
+                let f = frequency.0;
                 let timer_f = Self::frequency().0;
                 let pclk_ticks_per_timer_period = timer_f / f;
                 let psc: u16 = unwrap!(((pclk_ticks_per_timer_period - 1) / (1 << 16)).try_into());
-                let arr: u16 =
-                    unwrap!((pclk_ticks_per_timer_period / (u32::from(psc) + 1)).try_into());
+                let arr: u16 = unwrap!((pclk_ticks_per_timer_period / (u32::from(psc) + 1)).try_into());
 
                 let regs = Self::regs();
                 unsafe {
@@ -132,14 +132,13 @@ macro_rules! impl_32bit_timer {
                 crate::pac::$inst
             }
 
-            fn set_frequency<F: Into<Hertz>>(&mut self, frequency: F) {
+            fn set_frequency(&mut self, frequency: Hertz) {
                 use core::convert::TryInto;
-                let f = frequency.into().0;
+                let f = frequency.0;
                 let timer_f = Self::frequency().0;
                 let pclk_ticks_per_timer_period = (timer_f / f) as u64;
                 let psc: u16 = unwrap!(((pclk_ticks_per_timer_period - 1) / (1 << 32)).try_into());
-                let arr: u32 =
-                    unwrap!(((pclk_ticks_per_timer_period / (psc as u64 + 1)).try_into()));
+                let arr: u32 = unwrap!(((pclk_ticks_per_timer_period / (psc as u64 + 1)).try_into()));
 
                 let regs = Self::regs_gp32();
                 unsafe {
@@ -205,11 +204,21 @@ foreach_interrupt! {
         impl Basic16bitInstance for crate::peripherals::$inst {
         }
 
+        impl sealed::GeneralPurpose16bitInstance for crate::peripherals::$inst {
+            fn regs_gp16() -> crate::pac::timer::TimGp16 {
+                crate::pac::timer::TimGp16(crate::pac::$inst.0)
+            }
+        }
+
+        impl GeneralPurpose16bitInstance for crate::peripherals::$inst {
+        }
+
         impl sealed::AdvancedControlInstance for crate::peripherals::$inst {
             fn regs_advanced() -> crate::pac::timer::TimAdv {
                 crate::pac::$inst
             }
         }
+
         impl AdvancedControlInstance for crate::peripherals::$inst {
         }
     };

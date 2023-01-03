@@ -3,13 +3,13 @@
 #![feature(type_alias_impl_trait)]
 
 use core::cell::RefCell;
+
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::Delay;
+use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi;
-use embassy_rp::spi::Spi;
-use embassy_rp::Peripherals;
+use embassy_rp::spi::{Blocking, Spi};
+use embassy_time::Delay;
 use embedded_graphics::image::{Image, ImageRawLE};
 use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::mono_font::MonoTextStyle;
@@ -18,19 +18,18 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::text::Text;
 use st7789::{Orientation, ST7789};
+use {defmt_rtt as _, panic_probe as _};
 
 use crate::my_display_interface::SPIDeviceInterface;
 use crate::shared_spi::SpiDeviceWithCs;
 use crate::touch::Touch;
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
 //const DISPLAY_FREQ: u32 = 64_000_000;
 const TOUCH_FREQ: u32 = 200_000;
 
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_rp::init(Default::default());
     info!("Hello World!");
 
     let bl = p.PIN_13;
@@ -49,7 +48,8 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     config.phase = spi::Phase::CaptureOnSecondTransition;
     config.polarity = spi::Polarity::IdleHigh;
 
-    let spi_bus = RefCell::new(Spi::new(p.SPI1, clk, mosi, miso, config));
+    let spi: Spi<'_, _, Blocking> = Spi::new_blocking(p.SPI1, clk, mosi, miso, config);
+    let spi_bus = RefCell::new(spi);
 
     let display_spi = SpiDeviceWithCs::new(&spi_bus, Output::new(display_cs, Level::High));
     let touch_spi = SpiDeviceWithCs::new(&spi_bus, Output::new(touch_cs, Level::High));
@@ -94,9 +94,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
 
     loop {
         if let Some((x, y)) = touch.read() {
-            let style = PrimitiveStyleBuilder::new()
-                .fill_color(Rgb565::BLUE)
-                .build();
+            let style = PrimitiveStyleBuilder::new().fill_color(Rgb565::BLUE).build();
 
             Rectangle::new(Point::new(x - 1, y - 1), Size::new(3, 3))
                 .into_styled(style)
@@ -110,9 +108,9 @@ mod shared_spi {
     use core::cell::RefCell;
     use core::fmt::Debug;
 
-    use embedded_hal_1::digital::blocking::OutputPin;
+    use embedded_hal_1::digital::OutputPin;
     use embedded_hal_1::spi;
-    use embedded_hal_1::spi::blocking::SpiDevice;
+    use embedded_hal_1::spi::SpiDevice;
 
     #[derive(Copy, Clone, Eq, PartialEq, Debug)]
     pub enum SpiDeviceWithCsError<BUS, CS> {
@@ -155,7 +153,7 @@ mod shared_spi {
 
     impl<'a, BUS, CS> SpiDevice for SpiDeviceWithCs<'a, BUS, CS>
     where
-        BUS: spi::blocking::SpiBusFlush,
+        BUS: spi::SpiBusFlush,
         CS: OutputPin,
     {
         type Bus = BUS;
@@ -184,7 +182,7 @@ mod shared_spi {
 
 /// Driver for the XPT2046 resistive touchscreen sensor
 mod touch {
-    use embedded_hal_1::spi::blocking::{SpiBus, SpiBusRead, SpiBusWrite, SpiDevice};
+    use embedded_hal_1::spi::{SpiBus, SpiBusRead, SpiBusWrite, SpiDevice};
 
     struct Calibration {
         x1: i32,
@@ -248,8 +246,8 @@ mod touch {
 
 mod my_display_interface {
     use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
-    use embedded_hal_1::digital::blocking::OutputPin;
-    use embedded_hal_1::spi::blocking::{SpiBusWrite, SpiDevice};
+    use embedded_hal_1::digital::OutputPin;
+    use embedded_hal_1::spi::{SpiBusWrite, SpiDevice};
 
     /// SPI display interface.
     ///

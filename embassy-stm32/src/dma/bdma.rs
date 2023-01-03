@@ -3,15 +3,15 @@
 use core::sync::atomic::{fence, Ordering};
 use core::task::Waker;
 
-use embassy::interrupt::{Interrupt, InterruptExt};
-use embassy::waitqueue::AtomicWaker;
-
-use crate::_generated::BDMA_CHANNEL_COUNT;
-use crate::dma::Request;
-use crate::pac;
-use crate::pac::bdma::vals;
+use embassy_cortex_m::interrupt::Priority;
+use embassy_sync::waitqueue::AtomicWaker;
 
 use super::{TransferOptions, Word, WordSize};
+use crate::_generated::BDMA_CHANNEL_COUNT;
+use crate::dma::Request;
+use crate::interrupt::{Interrupt, InterruptExt};
+use crate::pac;
+use crate::pac::bdma::vals;
 
 impl From<WordSize> for vals::Size {
     fn from(raw: WordSize) -> Self {
@@ -39,10 +39,12 @@ impl State {
 static STATE: State = State::new();
 
 /// safety: must be called only once
-pub(crate) unsafe fn init() {
+pub(crate) unsafe fn init(irq_priority: Priority) {
     foreach_interrupt! {
         ($peri:ident, bdma, $block:ident, $signal_name:ident, $irq:ident) => {
-            crate::interrupt::$irq::steal().enable();
+            let irq = crate::interrupt::$irq::steal();
+            irq.set_priority(irq_priority);
+            irq.enable();
         };
     }
     crate::_generated::init_bdma();
@@ -76,8 +78,7 @@ foreach_dma_channel! {
                 );
             }
 
-            unsafe fn start_write_repeated<W: Word>(&mut self, _request: Request, repeated: W, count: usize, reg_addr: *mut W, options: TransferOptions) {
-                let buf = [repeated];
+            unsafe fn start_write_repeated<W: Word>(&mut self, _request: Request, repeated: *const W, count: usize, reg_addr: *mut W, options: TransferOptions) {
                 low_level_api::start_transfer(
                     pac::$dma_peri,
                     $channel_num,
@@ -85,7 +86,7 @@ foreach_dma_channel! {
                     _request,
                     vals::Dir::FROMMEMORY,
                     reg_addr as *const u32,
-                    buf.as_ptr() as *mut u32,
+                    repeated as *mut u32,
                     count,
                     false,
                     vals::Size::from(W::bits()),
@@ -185,14 +186,8 @@ mod low_level_api {
         #[cfg(dmamux)] dmamux_regs: pac::dmamux::Dmamux,
         #[cfg(dmamux)] dmamux_ch_num: u8,
     ) {
-        assert!(
-            options.mburst == crate::dma::Burst::Single,
-            "Burst mode not supported"
-        );
-        assert!(
-            options.pburst == crate::dma::Burst::Single,
-            "Burst mode not supported"
-        );
+        assert!(options.mburst == crate::dma::Burst::Single, "Burst mode not supported");
+        assert!(options.pburst == crate::dma::Burst::Single, "Burst mode not supported");
         assert!(
             options.flow_ctrl == crate::dma::FlowControl::Dma,
             "Peripheral flow control not supported"
@@ -206,10 +201,7 @@ mod low_level_api {
         super::super::dmamux::configure_dmamux(dmamux_regs, dmamux_ch_num, request);
 
         #[cfg(bdma_v2)]
-        critical_section::with(|_| {
-            dma.cselr()
-                .modify(|w| w.set_cs(channel_number as _, request))
-        });
+        critical_section::with(|_| dma.cselr().modify(|w| w.set_cs(channel_number as _, request)));
 
         // "Preceding reads and writes cannot be moved past subsequent writes."
         fence(Ordering::SeqCst);
@@ -279,10 +271,7 @@ mod low_level_api {
         let cr = dma.ch(channel_num).cr();
 
         if isr.teif(channel_num) {
-            panic!(
-                "DMA: error on BDMA@{:08x} channel {}",
-                dma.0 as u32, channel_num
-            );
+            panic!("DMA: error on BDMA@{:08x} channel {}", dma.0 as u32, channel_num);
         }
         if isr.tcif(channel_num) && cr.read().tcie() {
             cr.write(|_| ()); // Disable channel interrupts with the default value.

@@ -1,23 +1,20 @@
 #![macro_use]
 
-use core::marker::PhantomData;
+use core::future::poll_fn;
 use core::sync::atomic::{compiler_fence, Ordering};
 use core::task::Poll;
-use embassy::interrupt::InterruptExt;
-use embassy::util::Unborrow;
-use embassy_hal_common::unborrow;
-use futures::future::poll_fn;
+
+use embassy_embedded_hal::SetConfig;
+use embassy_hal_common::{into_ref, PeripheralRef};
+pub use embedded_hal_02::spi::{Mode, Phase, Polarity, MODE_0, MODE_1, MODE_2, MODE_3};
+pub use pac::spim0::frequency::FREQUENCY_A as Frequency;
 
 use crate::chip::FORCE_COPY_BUFFER_SIZE;
 use crate::gpio::sealed::Pin as _;
-use crate::gpio::{self, AnyPin};
-use crate::gpio::{Pin as GpioPin, PselBits};
-use crate::interrupt::Interrupt;
-use crate::util::{slice_ptr_parts, slice_ptr_parts_mut};
-use crate::{pac, util::slice_in_ram_or};
-
-pub use embedded_hal_02::spi::{Mode, Phase, Polarity, MODE_0, MODE_1, MODE_2, MODE_3};
-pub use pac::spim0::frequency::FREQUENCY_A as Frequency;
+use crate::gpio::{self, AnyPin, Pin as GpioPin, PselBits};
+use crate::interrupt::{Interrupt, InterruptExt};
+use crate::util::{slice_in_ram_or, slice_ptr_parts, slice_ptr_parts_mut};
+use crate::{pac, Peripheral};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -33,7 +30,7 @@ pub enum Error {
 ///
 /// For more details about EasyDMA, consult the module documentation.
 pub struct Spim<'d, T: Instance> {
-    phantom: PhantomData<&'d mut T>,
+    _p: PeripheralRef<'d, T>,
 }
 
 #[non_exhaustive]
@@ -55,55 +52,55 @@ impl Default for Config {
 
 impl<'d, T: Instance> Spim<'d, T> {
     pub fn new(
-        spim: impl Unborrow<Target = T> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        sck: impl Unborrow<Target = impl GpioPin> + 'd,
-        miso: impl Unborrow<Target = impl GpioPin> + 'd,
-        mosi: impl Unborrow<Target = impl GpioPin> + 'd,
+        spim: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        sck: impl Peripheral<P = impl GpioPin> + 'd,
+        miso: impl Peripheral<P = impl GpioPin> + 'd,
+        mosi: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(sck, miso, mosi);
+        into_ref!(sck, miso, mosi);
         Self::new_inner(
             spim,
             irq,
-            sck.degrade(),
-            Some(miso.degrade()),
-            Some(mosi.degrade()),
+            sck.map_into(),
+            Some(miso.map_into()),
+            Some(mosi.map_into()),
             config,
         )
     }
 
     pub fn new_txonly(
-        spim: impl Unborrow<Target = T> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        sck: impl Unborrow<Target = impl GpioPin> + 'd,
-        mosi: impl Unborrow<Target = impl GpioPin> + 'd,
+        spim: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        sck: impl Peripheral<P = impl GpioPin> + 'd,
+        mosi: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(sck, mosi);
-        Self::new_inner(spim, irq, sck.degrade(), None, Some(mosi.degrade()), config)
+        into_ref!(sck, mosi);
+        Self::new_inner(spim, irq, sck.map_into(), None, Some(mosi.map_into()), config)
     }
 
     pub fn new_rxonly(
-        spim: impl Unborrow<Target = T> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        sck: impl Unborrow<Target = impl GpioPin> + 'd,
-        miso: impl Unborrow<Target = impl GpioPin> + 'd,
+        spim: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        sck: impl Peripheral<P = impl GpioPin> + 'd,
+        miso: impl Peripheral<P = impl GpioPin> + 'd,
         config: Config,
     ) -> Self {
-        unborrow!(sck, miso);
-        Self::new_inner(spim, irq, sck.degrade(), Some(miso.degrade()), None, config)
+        into_ref!(sck, miso);
+        Self::new_inner(spim, irq, sck.map_into(), Some(miso.map_into()), None, config)
     }
 
     fn new_inner(
-        _spim: impl Unborrow<Target = T> + 'd,
-        irq: impl Unborrow<Target = T::Interrupt> + 'd,
-        sck: AnyPin,
-        miso: Option<AnyPin>,
-        mosi: Option<AnyPin>,
+        spim: impl Peripheral<P = T> + 'd,
+        irq: impl Peripheral<P = T::Interrupt> + 'd,
+        sck: PeripheralRef<'d, AnyPin>,
+        miso: Option<PeripheralRef<'d, AnyPin>>,
+        mosi: Option<PeripheralRef<'d, AnyPin>>,
         config: Config,
     ) -> Self {
-        unborrow!(irq);
+        into_ref!(spim, irq);
 
         let r = T::regs();
 
@@ -183,9 +180,7 @@ impl<'d, T: Instance> Spim<'d, T> {
         irq.unpend();
         irq.enable();
 
-        Self {
-            phantom: PhantomData,
-        }
+        Self { _p: spim }
     }
 
     fn on_interrupt(_: *mut ()) {
@@ -295,11 +290,7 @@ impl<'d, T: Instance> Spim<'d, T> {
     }
 
     /// Same as [`blocking_transfer`](Spim::blocking_transfer) but will fail instead of copying data into RAM. Consult the module level documentation to learn more.
-    pub fn blocking_transfer_from_ram(
-        &mut self,
-        read: &mut [u8],
-        write: &[u8],
-    ) -> Result<(), Error> {
+    pub fn blocking_transfer_from_ram(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error> {
         self.blocking_inner(read, write)
     }
 
@@ -372,7 +363,7 @@ impl<'d, T: Instance> Drop for Spim<'d, T> {
 }
 
 pub(crate) mod sealed {
-    use embassy::waitqueue::AtomicWaker;
+    use embassy_sync::waitqueue::AtomicWaker;
 
     use super::*;
 
@@ -394,7 +385,7 @@ pub(crate) mod sealed {
     }
 }
 
-pub trait Instance: Unborrow<Target = Self> + sealed::Instance + 'static {
+pub trait Instance: Peripheral<P = Self> + sealed::Instance + 'static {
     type Interrupt: Interrupt;
 }
 
@@ -455,25 +446,25 @@ mod eh1 {
         type Error = Error;
     }
 
-    impl<'d, T: Instance> embedded_hal_1::spi::blocking::SpiBusFlush for Spim<'d, T> {
+    impl<'d, T: Instance> embedded_hal_1::spi::SpiBusFlush for Spim<'d, T> {
         fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
     }
 
-    impl<'d, T: Instance> embedded_hal_1::spi::blocking::SpiBusRead<u8> for Spim<'d, T> {
+    impl<'d, T: Instance> embedded_hal_1::spi::SpiBusRead<u8> for Spim<'d, T> {
         fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
             self.blocking_transfer(words, &[])
         }
     }
 
-    impl<'d, T: Instance> embedded_hal_1::spi::blocking::SpiBusWrite<u8> for Spim<'d, T> {
+    impl<'d, T: Instance> embedded_hal_1::spi::SpiBusWrite<u8> for Spim<'d, T> {
         fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
             self.blocking_write(words)
         }
     }
 
-    impl<'d, T: Instance> embedded_hal_1::spi::blocking::SpiBus<u8> for Spim<'d, T> {
+    impl<'d, T: Instance> embedded_hal_1::spi::SpiBus<u8> for Spim<'d, T> {
         fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
             self.blocking_transfer(read, write)
         }
@@ -484,49 +475,79 @@ mod eh1 {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(all(feature = "unstable-traits", feature = "nightly"))] {
-        use core::future::Future;
+#[cfg(all(feature = "unstable-traits", feature = "nightly"))]
+mod eha {
 
-        impl<'d, T: Instance> embedded_hal_async::spi::SpiBusFlush for Spim<'d, T> {
-            type FlushFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
+    use super::*;
 
-            fn flush<'a>(&'a mut self) -> Self::FlushFuture<'a> {
-                async move { Ok(()) }
-            }
+    impl<'d, T: Instance> embedded_hal_async::spi::SpiBusFlush for Spim<'d, T> {
+        async fn flush(&mut self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    impl<'d, T: Instance> embedded_hal_async::spi::SpiBusRead<u8> for Spim<'d, T> {
+        async fn read(&mut self, words: &mut [u8]) -> Result<(), Error> {
+            self.read(words).await
+        }
+    }
+
+    impl<'d, T: Instance> embedded_hal_async::spi::SpiBusWrite<u8> for Spim<'d, T> {
+        async fn write(&mut self, data: &[u8]) -> Result<(), Error> {
+            self.write(data).await
+        }
+    }
+
+    impl<'d, T: Instance> embedded_hal_async::spi::SpiBus<u8> for Spim<'d, T> {
+        async fn transfer(&mut self, rx: &mut [u8], tx: &[u8]) -> Result<(), Error> {
+            self.transfer(rx, tx).await
         }
 
-        impl<'d, T: Instance> embedded_hal_async::spi::SpiBusRead<u8> for Spim<'d, T> {
-            type ReadFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn read<'a>(&'a mut self, words: &'a mut [u8]) -> Self::ReadFuture<'a> {
-                self.read(words)
-            }
+        async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Error> {
+            self.transfer_in_place(words).await
         }
+    }
+}
 
-        impl<'d, T: Instance> embedded_hal_async::spi::SpiBusWrite<u8> for Spim<'d, T> {
-            type WriteFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn write<'a>(&'a mut self, data: &'a [u8]) -> Self::WriteFuture<'a> {
-                self.write(data)
+impl<'d, T: Instance> SetConfig for Spim<'d, T> {
+    type Config = Config;
+    fn set_config(&mut self, config: &Self::Config) {
+        let r = T::regs();
+        // Configure mode.
+        let mode = config.mode;
+        r.config.write(|w| {
+            match mode {
+                MODE_0 => {
+                    w.order().msb_first();
+                    w.cpol().active_high();
+                    w.cpha().leading();
+                }
+                MODE_1 => {
+                    w.order().msb_first();
+                    w.cpol().active_high();
+                    w.cpha().trailing();
+                }
+                MODE_2 => {
+                    w.order().msb_first();
+                    w.cpol().active_low();
+                    w.cpha().leading();
+                }
+                MODE_3 => {
+                    w.order().msb_first();
+                    w.cpol().active_low();
+                    w.cpha().trailing();
+                }
             }
-        }
 
-        impl<'d, T: Instance> embedded_hal_async::spi::SpiBus<u8> for Spim<'d, T> {
-            type TransferFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
+            w
+        });
 
-            fn transfer<'a>(&'a mut self, rx: &'a mut [u8], tx: &'a [u8]) -> Self::TransferFuture<'a> {
-                self.transfer(rx, tx)
-            }
+        // Configure frequency.
+        let frequency = config.frequency;
+        r.frequency.write(|w| w.frequency().variant(frequency));
 
-            type TransferInPlaceFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-            fn transfer_in_place<'a>(
-                &'a mut self,
-                words: &'a mut [u8],
-            ) -> Self::TransferInPlaceFuture<'a> {
-                self.transfer_in_place(words)
-            }
-        }
+        // Set over-read character
+        let orc = config.orc;
+        r.orc.write(|w| unsafe { w.orc().bits(orc) });
     }
 }

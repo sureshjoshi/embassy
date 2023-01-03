@@ -2,21 +2,16 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-// global logger
 use defmt::{info, unwrap};
-use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
-use panic_probe as _;
+static SIGNAL: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 
-use embassy::channel::Signal;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
-
-use embassy_stm32::Peripherals;
-
-static SIGNAL: Signal<u32> = Signal::new();
-
-#[embassy::task]
+#[embassy_executor::task]
 async fn my_sending_task() {
     let mut counter: u32 = 0;
 
@@ -29,8 +24,9 @@ async fn my_sending_task() {
     }
 }
 
-#[embassy::main]
-async fn main(spawner: Spawner, _p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let _p = embassy_stm32::init(Default::default());
     unwrap!(spawner.spawn(my_sending_task()));
 
     loop {

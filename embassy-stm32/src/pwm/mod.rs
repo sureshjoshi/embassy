@@ -54,7 +54,10 @@ impl From<OutputCompareMode> for stm32_metapac::timer::vals::Ocm {
 pub(crate) mod sealed {
     use super::*;
 
-    pub trait CaptureCompare16bitInstance: crate::timer::sealed::Basic16bitInstance {
+    pub trait CaptureCompare16bitInstance: crate::timer::sealed::GeneralPurpose16bitInstance {
+        /// Global output enable. Does not do anything on non-advanced timers.
+        unsafe fn enable_outputs(&mut self, enable: bool);
+
         unsafe fn set_output_compare_mode(&mut self, channel: Channel, mode: OutputCompareMode);
 
         unsafe fn enable_channel(&mut self, channel: Channel, enable: bool);
@@ -64,9 +67,7 @@ pub(crate) mod sealed {
         unsafe fn get_max_compare_value(&self) -> u16;
     }
 
-    pub trait CaptureCompare32bitInstance:
-        crate::timer::sealed::GeneralPurpose32bitInstance
-    {
+    pub trait CaptureCompare32bitInstance: crate::timer::sealed::GeneralPurpose32bitInstance {
         unsafe fn set_output_compare_mode(&mut self, channel: Channel, mode: OutputCompareMode);
 
         unsafe fn enable_channel(&mut self, channel: Channel, enable: bool);
@@ -78,14 +79,11 @@ pub(crate) mod sealed {
 }
 
 pub trait CaptureCompare16bitInstance:
-    sealed::CaptureCompare16bitInstance + crate::timer::Basic16bitInstance + 'static
+    sealed::CaptureCompare16bitInstance + crate::timer::GeneralPurpose16bitInstance + 'static
 {
 }
 pub trait CaptureCompare32bitInstance:
-    sealed::CaptureCompare32bitInstance
-    + CaptureCompare16bitInstance
-    + crate::timer::GeneralPurpose32bitInstance
-    + 'static
+    sealed::CaptureCompare32bitInstance + CaptureCompare16bitInstance + crate::timer::GeneralPurpose32bitInstance + 'static
 {
 }
 
@@ -93,11 +91,9 @@ pub trait CaptureCompare32bitInstance:
 macro_rules! impl_compare_capable_16bit {
     ($inst:ident) => {
         impl crate::pwm::sealed::CaptureCompare16bitInstance for crate::peripherals::$inst {
-            unsafe fn set_output_compare_mode(
-                &mut self,
-                channel: crate::pwm::Channel,
-                mode: OutputCompareMode,
-            ) {
+            unsafe fn enable_outputs(&mut self, _enable: bool) {}
+
+            unsafe fn set_output_compare_mode(&mut self, channel: crate::pwm::Channel, mode: OutputCompareMode) {
                 use crate::timer::sealed::GeneralPurpose16bitInstance;
                 let r = Self::regs_gp16();
                 let raw_channel: usize = channel.raw();
@@ -114,9 +110,7 @@ macro_rules! impl_compare_capable_16bit {
 
             unsafe fn set_compare_value(&mut self, channel: Channel, value: u16) {
                 use crate::timer::sealed::GeneralPurpose16bitInstance;
-                Self::regs_gp16()
-                    .ccr(channel.raw())
-                    .modify(|w| w.set_ccr(value));
+                Self::regs_gp16().ccr(channel.raw()).modify(|w| w.set_ccr(value));
             }
 
             unsafe fn get_max_compare_value(&self) -> u16 {
@@ -129,38 +123,7 @@ macro_rules! impl_compare_capable_16bit {
 
 foreach_interrupt! {
     ($inst:ident, timer, TIM_GP16, UP, $irq:ident) => {
-        impl crate::pwm::sealed::CaptureCompare16bitInstance for crate::peripherals::$inst {
-            unsafe fn set_output_compare_mode(
-                &mut self,
-                channel: crate::pwm::Channel,
-                mode: OutputCompareMode,
-            ) {
-                use crate::timer::sealed::GeneralPurpose16bitInstance;
-                let r = Self::regs_gp16();
-                let raw_channel: usize = channel.raw();
-                r.ccmr_output(raw_channel / 2)
-                    .modify(|w| w.set_ocm(raw_channel % 2, mode.into()));
-            }
-
-            unsafe fn enable_channel(&mut self, channel: Channel, enable: bool) {
-                use crate::timer::sealed::GeneralPurpose16bitInstance;
-                Self::regs_gp16()
-                    .ccer()
-                    .modify(|w| w.set_cce(channel.raw(), enable));
-            }
-
-            unsafe fn set_compare_value(&mut self, channel: Channel, value: u16) {
-                use crate::timer::sealed::GeneralPurpose16bitInstance;
-                Self::regs_gp16()
-                    .ccr(channel.raw())
-                    .modify(|w| w.set_ccr(value));
-            }
-
-            unsafe fn get_max_compare_value(&self) -> u16 {
-                use crate::timer::sealed::GeneralPurpose16bitInstance;
-                Self::regs_gp16().arr().read().arr()
-            }
-        }
+        impl_compare_capable_16bit!($inst);
 
         impl CaptureCompare16bitInstance for crate::peripherals::$inst {
 
@@ -205,6 +168,12 @@ foreach_interrupt! {
 
     ($inst:ident, timer, TIM_ADV, UP, $irq:ident) => {
         impl crate::pwm::sealed::CaptureCompare16bitInstance for crate::peripherals::$inst {
+            unsafe fn enable_outputs(&mut self, enable: bool) {
+                use crate::timer::sealed::AdvancedControlInstance;
+                let r = Self::regs_advanced();
+                r.bdtr().modify(|w| w.set_moe(enable));
+            }
+
             unsafe fn set_output_compare_mode(
                 &mut self,
                 channel: crate::pwm::Channel,

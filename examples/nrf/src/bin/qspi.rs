@@ -3,12 +3,9 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::{assert_eq, info, unwrap};
-use embassy::executor::Spawner;
-use embassy_nrf::Peripherals;
+use embassy_executor::Spawner;
 use embassy_nrf::{interrupt, qspi};
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use {defmt_rtt as _, panic_probe as _};
 
 const PAGE_SIZE: usize = 4096;
 
@@ -17,8 +14,9 @@ const PAGE_SIZE: usize = 4096;
 #[repr(C, align(4))]
 struct AlignedBuf([u8; 4096]);
 
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     // Config for the MX25R64 present in the nRF52840 DK
     let mut config = qspi::Config::default();
     config.read_opcode = qspi::ReadOpcode::READ4IO;

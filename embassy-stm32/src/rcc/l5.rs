@@ -1,11 +1,15 @@
+use stm32_metapac::PWR;
+
 use crate::pac::rcc::vals::{Hpre, Msirange, Pllsrc, Ppre, Sw};
 use crate::pac::{FLASH, RCC};
 use crate::rcc::{set_freqs, Clocks};
 use crate::time::Hertz;
-use crate::time::U32Ext;
 
-/// HSI16 speed
-pub const HSI16_FREQ: u32 = 16_000_000;
+/// HSI speed
+pub const HSI_FREQ: Hertz = Hertz(16_000_000);
+
+/// LSI speed
+pub const LSI_FREQ: Hertz = Hertz(32_000);
 
 /// System clock mux source
 #[derive(Clone, Copy)]
@@ -103,7 +107,7 @@ seq_macro::seq!(N in 8..=86 {
     #[derive(Clone, Copy)]
     pub enum PLLMul {
         #(
-            Mul#N,
+            Mul~N,
         )*
     }
 
@@ -111,7 +115,7 @@ seq_macro::seq!(N in 8..=86 {
         fn from(val: PLLMul) -> u8 {
             match val {
                 #(
-                    PLLMul::Mul#N => N,
+                    PLLMul::Mul~N => N,
                 )*
             }
         }
@@ -121,7 +125,7 @@ seq_macro::seq!(N in 8..=86 {
         pub fn to_mul(self) -> u32 {
             match self {
                 #(
-                    PLLMul::Mul#N => N,
+                    PLLMul::Mul~N => N,
                 )*
             }
         }
@@ -295,6 +299,7 @@ impl Default for Config {
 }
 
 pub(crate) unsafe fn init(config: Config) {
+    PWR.cr1().modify(|w| w.set_vos(stm32_metapac::pwr::vals::Vos::RANGE0));
     let (sys_clk, sw) = match config.mux {
         ClockSrc::MSI(range) => {
             // Enable MSI
@@ -320,7 +325,7 @@ pub(crate) unsafe fn init(config: Config) {
             RCC.cr().write(|w| w.set_hsion(true));
             while !RCC.cr().read().hsirdy() {}
 
-            (HSI16_FREQ, Sw::HSI16)
+            (HSI_FREQ.0, Sw::HSI16)
         }
         ClockSrc::HSE(freq) => {
             // Enable HSE
@@ -341,7 +346,7 @@ pub(crate) unsafe fn init(config: Config) {
                     // Enable HSI
                     RCC.cr().write(|w| w.set_hsion(true));
                     while !RCC.cr().read().hsirdy() {}
-                    HSI16_FREQ
+                    HSI_FREQ.0
                 }
                 PLLSource::MSI(range) => {
                     // Enable MSI
@@ -482,13 +487,13 @@ pub(crate) unsafe fn init(config: Config) {
     };
 
     set_freqs(Clocks {
-        sys: sys_clk.hz(),
-        ahb1: ahb_freq.hz(),
-        ahb2: ahb_freq.hz(),
-        ahb3: ahb_freq.hz(),
-        apb1: apb1_freq.hz(),
-        apb2: apb2_freq.hz(),
-        apb1_tim: apb1_tim_freq.hz(),
-        apb2_tim: apb2_tim_freq.hz(),
+        sys: Hertz(sys_clk),
+        ahb1: Hertz(ahb_freq),
+        ahb2: Hertz(ahb_freq),
+        ahb3: Hertz(ahb_freq),
+        apb1: Hertz(apb1_freq),
+        apb2: Hertz(apb2_freq),
+        apb1_tim: Hertz(apb1_tim_freq),
+        apb2_tim: Hertz(apb2_tim_freq),
     });
 }

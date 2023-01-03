@@ -9,19 +9,19 @@
 #![feature(type_alias_impl_trait)]
 
 use core::mem;
-use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
-use embassy_nrf::twim::{self, Twim};
-use embassy_nrf::{interrupt, Peripherals};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use defmt::*;
+use embassy_executor::Spawner;
+use embassy_nrf::interrupt;
+use embassy_nrf::twim::{self, Twim};
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
 const ADDRESS: u8 = 0x50;
 
-#[embassy::main]
-async fn main(_spawner: Spawner, mut p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_p: Spawner) {
+    let mut p = embassy_nrf::init(Default::default());
     info!("Started!");
     let mut irq = interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0);
 

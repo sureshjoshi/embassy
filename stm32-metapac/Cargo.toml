@@ -1,8 +1,7 @@
 [package]
 name = "stm32-metapac"
 version = "0.1.0"
-edition = "2018"
-resolver = "2"
+edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/embassy-rs/embassy"
 description = "Peripheral Access Crate (PAC) for all STM32 chips, including metadata."
@@ -41,7 +40,7 @@ flavors = [
 ]
 
 [dependencies]
-cortex-m = "0.7.3"
+cortex-m = "0.7.6"
 cortex-m-rt = { version = ">=0.6.15,<0.8", optional = true }
 
 # BEGIN BUILD DEPENDENCIES
@@ -1176,8 +1175,6 @@ stm32l476ve = []
 stm32l476vg = []
 stm32l476ze = []
 stm32l476zg = []
-stm32l485jc = []
-stm32l485je = []
 stm32l486jg = []
 stm32l486qg = []
 stm32l486rg = []

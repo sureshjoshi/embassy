@@ -1,22 +1,20 @@
-use atomic_polyfill::{AtomicU32, AtomicU8};
 use core::cell::Cell;
 use core::convert::TryInto;
 use core::sync::atomic::{compiler_fence, Ordering};
 use core::{mem, ptr};
-use embassy::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy::blocking_mutex::Mutex;
-use embassy::interrupt::InterruptExt;
-use embassy::time::driver::{AlarmHandle, Driver};
-use embassy::time::TICKS_PER_SECOND;
+
+use atomic_polyfill::{AtomicU32, AtomicU8};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_time::driver::{AlarmHandle, Driver};
+use embassy_time::TICK_HZ;
 use stm32_metapac::timer::regs;
 
-use crate::interrupt;
-use crate::interrupt::CriticalSection;
+use crate::interrupt::{CriticalSection, InterruptExt};
 use crate::pac::timer::vals;
-use crate::peripherals;
 use crate::rcc::sealed::RccPeripheral;
-use crate::timer::sealed::Basic16bitInstance as BasicInstance;
-use crate::timer::sealed::GeneralPurpose16bitInstance as Instance;
+use crate::timer::sealed::{Basic16bitInstance as BasicInstance, GeneralPurpose16bitInstance as Instance};
+use crate::{interrupt, peripherals};
 
 #[cfg(not(any(time_driver_tim12, time_driver_tim15)))]
 const ALARM_COUNT: usize = 3;
@@ -135,7 +133,7 @@ struct RtcDriver {
 
 const ALARM_STATE_NEW: AlarmState = AlarmState::new();
 
-embassy::time_driver_impl!(static DRIVER: RtcDriver = RtcDriver {
+embassy_time::time_driver_impl!(static DRIVER: RtcDriver = RtcDriver {
     period: AtomicU32::new(0),
     alarm_count: AtomicU8::new(0),
     alarms: Mutex::const_new(CriticalSectionRawMutex::new(), [ALARM_STATE_NEW; ALARM_COUNT]),
@@ -155,7 +153,7 @@ impl RtcDriver {
             r.cr1().modify(|w| w.set_cen(false));
             r.cnt().write(|w| w.set_cnt(0));
 
-            let psc = timer_freq.0 / TICKS_PER_SECOND as u32 - 1;
+            let psc = timer_freq.0 / TICK_HZ as u32 - 1;
             let psc: u16 = match psc.try_into() {
                 Err(_) => panic!("psc division overflow: {}", psc),
                 Ok(n) => n,
@@ -271,15 +269,13 @@ impl Driver for RtcDriver {
     }
 
     unsafe fn allocate_alarm(&self) -> Option<AlarmHandle> {
-        let id = self
-            .alarm_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
-                if x < ALARM_COUNT as u8 {
-                    Some(x + 1)
-                } else {
-                    None
-                }
-            });
+        let id = self.alarm_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+            if x < ALARM_COUNT as u8 {
+                Some(x + 1)
+            } else {
+                None
+            }
+        });
 
         match id {
             Ok(id) => Some(AlarmHandle::new(id)),
@@ -296,19 +292,23 @@ impl Driver for RtcDriver {
         })
     }
 
-    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) {
+    fn set_alarm(&self, alarm: AlarmHandle, timestamp: u64) -> bool {
         critical_section::with(|cs| {
             let r = T::regs_gp16();
 
-            let n = alarm.id() as _;
+            let n = alarm.id() as usize;
             let alarm = self.get_alarm(cs, alarm);
             alarm.timestamp.set(timestamp);
 
             let t = self.now();
             if timestamp <= t {
+                // If alarm timestamp has passed the alarm will not fire.
+                // Disarm the alarm and return `false` to indicate that.
                 unsafe { r.dier().modify(|w| w.set_ccie(n + 1, false)) };
-                self.trigger_alarm(n, cs);
-                return;
+
+                alarm.timestamp.set(u64::MAX);
+
+                return false;
             }
 
             let safe_timestamp = timestamp.max(t + 3);
@@ -321,6 +321,8 @@ impl Driver for RtcDriver {
             let diff = timestamp - t;
             // NOTE(unsafe) We're in a critical section
             unsafe { r.dier().modify(|w| w.set_ccie(n + 1, diff < 0xc000)) };
+
+            true
         })
     }
 }

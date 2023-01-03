@@ -3,17 +3,15 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::{info, unwrap};
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
+use embassy_executor::Spawner;
 use embassy_stm32::flash::Flash;
-use embassy_stm32::Peripherals;
+use embassy_time::{Duration, Timer};
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_stm32::init(Default::default());
     info!("Hello Flash!");
 
     const ADDR: u32 = 0x8_0000;
@@ -21,7 +19,7 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     // wait a bit before accessing the flash
     Timer::after(Duration::from_millis(300)).await;
 
-    let mut f = Flash::unlock(p.FLASH);
+    let mut f = Flash::new(p.FLASH);
 
     info!("Reading...");
     let mut buf = [0u8; 32];
@@ -40,8 +38,8 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     unwrap!(f.write(
         ADDR,
         &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28, 29, 30, 31, 32
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+            30, 31, 32
         ]
     ));
 
@@ -52,8 +50,8 @@ async fn main(_spawner: Spawner, p: Peripherals) {
     assert_eq!(
         &buf[..],
         &[
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28, 29, 30, 31, 32
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+            30, 31, 32
         ]
     );
 }

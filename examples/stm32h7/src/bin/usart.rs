@@ -2,22 +2,22 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-use defmt::*;
-use defmt_rtt as _; // global logger
-use embassy::executor::Executor;
-use embassy::util::Forever;
-use embassy_stm32::dma::NoDma;
-use embassy_stm32::usart::{Config, Uart};
-use panic_probe as _;
-
 use cortex_m_rt::entry;
+use defmt::*;
+use embassy_executor::Executor;
+use embassy_stm32::dma::NoDma;
+use embassy_stm32::interrupt;
+use embassy_stm32::usart::{Config, Uart};
+use static_cell::StaticCell;
+use {defmt_rtt as _, panic_probe as _};
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn main_task() {
     let p = embassy_stm32::init(Default::default());
 
     let config = Config::default();
-    let mut usart = Uart::new(p.UART7, p.PF6, p.PF7, NoDma, NoDma, config);
+    let irq = interrupt::take!(UART7);
+    let mut usart = Uart::new(p.UART7, p.PF6, p.PF7, irq, NoDma, NoDma, config);
 
     unwrap!(usart.blocking_write(b"Hello Embassy World!\r\n"));
     info!("wrote Hello, starting echo");
@@ -29,13 +29,13 @@ async fn main_task() {
     }
 }
 
-static EXECUTOR: Forever<Executor> = Forever::new();
+static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
 #[entry]
 fn main() -> ! {
     info!("Hello World!");
 
-    let executor = EXECUTOR.put(Executor::new());
+    let executor = EXECUTOR.init(Executor::new());
 
     executor.run(|spawner| {
         unwrap!(spawner.spawn(main_task()));

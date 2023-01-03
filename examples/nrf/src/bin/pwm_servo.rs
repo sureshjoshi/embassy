@@ -3,16 +3,14 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::*;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
+use embassy_executor::Spawner;
 use embassy_nrf::pwm::{Prescaler, SimplePwm};
-use embassy_nrf::Peripherals;
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt_rtt as _; // global logger
-use panic_probe as _;
-
-#[embassy::main]
-async fn main(_spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let mut pwm = SimplePwm::new_1ch(p.PWM0, p.P0_05);
     // sg90 microervo requires 50hz or 20ms period
     // set_period can only set down to 125khz so we cant use it directly

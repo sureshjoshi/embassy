@@ -3,15 +3,12 @@
 #![feature(type_alias_impl_trait)]
 
 use defmt::unwrap;
-use embassy::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy::channel::channel::Channel;
-use embassy::executor::Spawner;
-use embassy::time::{Duration, Timer};
+use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
-use embassy_nrf::Peripherals;
-
-use defmt_rtt as _; // global logger
-use panic_probe as _;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_time::{Duration, Timer};
+use {defmt_rtt as _, panic_probe as _};
 
 enum LedState {
     On,
@@ -20,7 +17,7 @@ enum LedState {
 
 static CHANNEL: Channel<ThreadModeRawMutex, LedState, 1> = Channel::new();
 
-#[embassy::task]
+#[embassy_executor::task]
 async fn my_task() {
     loop {
         CHANNEL.send(LedState::On).await;
@@ -30,8 +27,9 @@ async fn my_task() {
     }
 }
 
-#[embassy::main]
-async fn main(spawner: Spawner, p: Peripherals) {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
     let mut led = Output::new(p.P0_13, Level::Low, OutputDrive::Standard);
 
     unwrap!(spawner.spawn(my_task()));
