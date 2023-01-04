@@ -25,7 +25,8 @@ async fn main(_spawner: Spawner) {
 
     // Create the driver, from the HAL.
     let irq = interrupt::take!(OTG_FS);
-    let driver = Driver::new_fs(p.USB_OTG_FS, irq, p.PA12, p.PA11);
+    let mut ep_out_buffer = [0u8; 256];
+    let driver = Driver::new_fs(p.USB_OTG_FS, irq, p.PA12, p.PA11, &mut ep_out_buffer);
 
     // Create embassy-usb Config
     let config = embassy_usb::Config::new(0xc0de, 0xcafe);
