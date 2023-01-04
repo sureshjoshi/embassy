@@ -7,8 +7,8 @@ use embassy_cortex_m::interrupt::InterruptExt;
 use embassy_hal_common::{into_ref, Peripheral};
 use embassy_sync::waitqueue::AtomicWaker;
 use embassy_usb_driver::{
-    self, Direction, EndpointAddress, EndpointAllocError, EndpointError, EndpointInfo, EndpointOut, EndpointType,
-    Event, Unsupported,
+    self, Direction, EndpointAddress, EndpointAllocError, EndpointError, EndpointIn, EndpointInfo, EndpointOut,
+    EndpointType, Event, Unsupported,
 };
 use futures::future::poll_fn;
 
@@ -192,7 +192,7 @@ impl<'d, T: Instance> Driver<'d, T> {
                     for chunk in buf.chunks_mut(4) {
                         // RX FIFO is shared
                         let data = r.fifo(0).read().data();
-                        chunk.copy_from_slice(&data.to_ne_bytes());
+                        chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
                     }
 
                     *state.ep_out_size[ep_num].get() = len as u16;
@@ -208,15 +208,55 @@ impl<'d, T: Instance> Driver<'d, T> {
                         r.fifo(0).read().data();
                     }
                 }
+            }
 
-                // match x.pktstsd() {
-                //     vals::Pktstsd::OUT_NAK => trace!("OUT_NAK"),
-                //     vals::Pktstsd::OUT_DATA_RX => trace!("OUT_DATA_RX"),
-                //     vals::Pktstsd::OUT_DATA_DONE => trace!("OUT_DATA_DONE"),
-                //     vals::Pktstsd::SETUP_DATA_DONE => trace!("SETUP_DATA_DONE"),
-                //     vals::Pktstsd::SETUP_DATA_RX => trace!("SETUP_DATA_RX"),
-                //     x => trace!("unknown PKTSTS: {}", x.0),
-                // }
+            // IN endpoint interrupt
+            if ints.iepint() {
+                let mut ep_mask = r.daint().read().iepint();
+                let mut ep_num = 0;
+
+                while ep_mask != 0 {
+                    if ep_mask & 1 != 0 {
+                        let ep_ints = r.diepint(ep_num).read();
+
+                        // clear all
+                        r.diepint(ep_num).write_value(ep_ints);
+
+                        // txfe is cleared in DIEPEMPMSK
+                        if ep_ints.txfe() {
+                            critical_section::with(|_| {
+                                r.diepempmsk().modify(|w| {
+                                    w.set_ineptxfem(w.ineptxfem() & !(1 << ep_num));
+                                });
+                            });
+                        }
+
+                        state.ep_in_wakers[ep_num].wake();
+                        trace!("in ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+                    }
+
+                    ep_mask >>= 1;
+                    ep_num += 1;
+                }
+            }
+
+            // OUT endpoint interrupt
+            if ints.oepint() {
+                let mut ep_mask = r.daint().read().oepint();
+                let mut ep_num = 0;
+
+                while ep_mask != 0 {
+                    if ep_mask & 1 != 0 {
+                        let ep_ints = r.doepint(ep_num).read();
+                        // clear all
+                        r.doepint(ep_num).write_value(ep_ints);
+                        state.ep_out_wakers[ep_num].wake();
+                        trace!("out ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+                    }
+
+                    ep_mask >>= 1;
+                    ep_num += 1;
+                }
             }
         }
     }
@@ -377,6 +417,7 @@ impl<'d, T: Instance> Bus<'d, T> {
                 w.set_usbsuspm(true);
                 w.set_wuim(true);
                 w.set_iepint(true);
+                w.set_oepint(true);
                 w.set_rxflvlm(true);
             });
         }
@@ -734,11 +775,6 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
         self.enabled = false;
     }
 
-    fn force_reset(&mut self) -> Result<(), Unsupported> {
-        trace!("force_reset");
-        Err(Unsupported)
-    }
-
     async fn remote_wakeup(&mut self) -> Result<(), Unsupported> {
         Err(Unsupported)
     }
@@ -799,7 +835,6 @@ impl<'d, T: Instance> embassy_usb_driver::Endpoint for Endpoint<'d, T, Out> {
     async fn wait_enabled(&mut self) {
         trace!("wait_enabled OUT WAITING");
         // todo
-        poll_fn(|_| Poll::<()>::Pending).await;
         trace!("wait_enabled OUT OK");
     }
 }
@@ -840,12 +875,52 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointIn for Endpoint<'d, T, In> {
             return Err(EndpointError::BufferOverflow);
         }
 
+        let r = T::regs();
         let index = self.info.addr.index();
+        let state = T::state();
 
-        trace!("WRITE WAITING");
+        if buf.len() > 0 {
+            poll_fn(|cx| {
+                state.ep_in_wakers[index].register(cx.waker());
 
-        // todo
-        poll_fn(|_| Poll::<()>::Pending).await;
+                let size_words = (buf.len() + 3) / 4;
+                let fifo_space = unsafe { r.dtxfsts(index).read().ineptfsav() as usize };
+                if size_words > fifo_space {
+                    // not enough space in fifo, enable tx fifo empty interrupt
+                    critical_section::with(|_| unsafe {
+                        r.diepempmsk().modify(|w| {
+                            w.set_ineptxfem(w.ineptxfem() | (1 << index));
+                        });
+                    });
+
+                    trace!("tx fifo for ep={} full, waiting for txfe", index);
+
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await
+        }
+
+        unsafe {
+            r.dieptsiz(index).write(|w| {
+                w.set_mcnt(1);
+                w.set_pktcnt(1);
+                w.set_xfrsiz(buf.len() as _);
+            });
+
+            r.diepctl(index).modify(|w| {
+                w.set_cnak(true);
+                w.set_epena(true);
+            });
+
+            for chunk in buf.chunks(4) {
+                let mut tmp = [0u8; 4];
+                tmp[0..chunk.len()].copy_from_slice(chunk);
+                r.fifo(index).write(|w| w.set_data(u32::from_ne_bytes(tmp)));
+            }
+        }
 
         trace!("WRITE OK");
 
@@ -887,26 +962,13 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
     }
 
     async fn data_out(&mut self, buf: &mut [u8], first: bool, last: bool) -> Result<usize, EndpointError> {
-        let regs = T::regs();
-        // TODO
-        let rx_len = 0;
-        Ok(rx_len)
+        trace!("control: data_out");
+        self.ep_out.read(buf).await
     }
 
     async fn data_in(&mut self, data: &[u8], first: bool, last: bool) -> Result<(), EndpointError> {
         trace!("control: data_in");
-
-        if data.len() > self.ep_in.info.max_packet_size as usize {
-            return Err(EndpointError::BufferOverflow);
-        }
-
-        let regs = T::regs();
-        // TODO
-        poll_fn(|_| Poll::<()>::Pending).await;
-
-        trace!("WRITE OK");
-
-        Ok(())
+        self.ep_in.write(data).await
     }
 
     async fn accept(&mut self) {
