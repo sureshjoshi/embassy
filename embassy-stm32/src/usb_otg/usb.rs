@@ -243,28 +243,25 @@ impl<'d, T: Instance> Driver<'d, T> {
             }
 
             if ints.rxflvl() {
-                let x = r.grxstsp().read();
-                match x.pktstsd() {
-                    vals::Pktstsd::OUT_NAK => trace!("OUT_NAK"),
-                    vals::Pktstsd::OUT_DATA_RX => trace!("OUT_DATA_RX"),
-                    vals::Pktstsd::OUT_DATA_DONE => trace!("OUT_DATA_DONE"),
-                    vals::Pktstsd::SETUP_DATA_DONE => trace!("SETUP_DATA_DONE"),
-                    vals::Pktstsd::SETUP_DATA_RX => trace!("SETUP_DATA_RX"),
-                    x => trace!("unknown PKTSTS: {}", x.0),
-                }
+                r.gintmsk().modify(|w| {});
+                let ep_index = r.grxstsr().read().epnum() as usize;
+                assert!(ep_index <= T::ENDPOINT_COUNT);
+                T::state().ep_out_wakers[ep_index].wake();
             }
         }
     }
 
     fn rx_fifo_size_words(&self) -> u16 {
-        self.ep_in
+        // USB out direction (host perspective) is RX direction (device perspective)
+        self.ep_out
             .iter()
             .map(|ep| ep.map(|ep| ep.size_words).unwrap_or(0))
             .sum()
     }
 
     fn tx_fifo_size_words(&self) -> u16 {
-        self.ep_out
+        // USB in direction (host perspective) is TX direction (device perspective)
+        self.ep_in
             .iter()
             .map(|ep| ep.map(|ep| ep.size_words).unwrap_or(0))
             .sum()
@@ -324,6 +321,76 @@ impl<'d, T: Instance> Driver<'d, T> {
 
         trace!("  index={}", index);
 
+        // EP0 has special MPSIZ values
+        let mpsiz: u16 = if index == 0 {
+            match max_packet_size {
+                8 => 0b11 as u16,
+                16 => 0b10 as u16,
+                32 => 0b01 as u16,
+                64 => 0b00 as u16,
+                other => panic!("Unsupported EP0 size: {}", other),
+            }
+        } else {
+            max_packet_size
+        };
+
+        let r = T::regs();
+        match D::dir() {
+            Direction::Out => {
+                if index == 0 {
+                    unsafe {
+                        r.doepctl(index).write(|w| {
+                            w.set_cnak(true);
+                            w.set_mpsiz(mpsiz);
+                            w.set_epena(true);
+                        });
+                        r.doeptsiz(index).write(|w| {
+                            w.set_rxdpid_stupcnt(1);
+                            w.set_pktcnt(1);
+                            w.set_xfrsiz(max_packet_size as _);
+                        });
+                    }
+                } else {
+                    unsafe {
+                        r.doepctl(index).write(|w| {
+                            w.set_sd0pid_sevnfrm(true);
+                            w.set_cnak(true);
+                            w.set_epena(true);
+                            w.set_usbaep(true);
+                            w.set_eptyp(to_eptyp(ep_type));
+                            w.set_mpsiz(mpsiz);
+                        });
+                    }
+                }
+            }
+            Direction::In => {
+                if index == 0 {
+                    unsafe {
+                        r.diepctl(index).write(|w| {
+                            w.set_snak(true);
+                            w.set_mpsiz(mpsiz);
+                        });
+                        r.dieptsiz(index).write(|w| {
+                            w.set_pktcnt(0);
+                            w.set_xfrsiz(max_packet_size as _);
+                        });
+                    }
+                } else {
+                    unsafe {
+                        r.diepctl(index).write(|w| {
+                            w.set_snak(true);
+                            w.set_usbaep(true);
+                            w.set_eptyp(to_eptyp(ep_type));
+                            w.set_sd0pid_sevnfrm(true);
+                            w.set_txfnum(index as _);
+                            w.set_mpsiz(mpsiz);
+                        });
+                        // DIEPTSIZx is set during transfer
+                    }
+                }
+            }
+        }
+
         Ok(Endpoint {
             _phantom: PhantomData,
             info: EndpointInfo {
@@ -373,13 +440,15 @@ impl<'d, T: Instance> embassy_usb_driver::Driver<'d> for Driver<'d, T> {
         let r = T::regs();
 
         unsafe {
+            // Configure RX fifo size. All endpoints share the same FIFO area.
             let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + self.rx_fifo_size_words();
             r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words));
             trace!("configuring rx fifo size={}", rx_fifo_size_words);
 
+            // Configure TX (USB in direction) fifo size for each endpoint
             let mut fifo_top = rx_fifo_size_words;
             for i in 0..T::ENDPOINT_COUNT {
-                let ep_size_words = self.ep_out[i].map(|ep| ep.size_words).unwrap_or(0);
+                let ep_size_words = self.ep_in[i].map(|ep| ep.size_words).unwrap_or(0);
                 trace!(
                     "configuring tx fifo ep={}, offset={}, size={}",
                     i,
@@ -396,7 +465,14 @@ impl<'d, T: Instance> embassy_usb_driver::Driver<'d> for Driver<'d, T> {
                 fifo_top += ep_size_words;
             }
 
-            assert!(fifo_top <= T::FIFO_DEPTH_WORDS);
+            assert!(
+                fifo_top <= T::FIFO_DEPTH_WORDS,
+                "FIFO allocations exceeded maximum capacity"
+            );
+
+            for ep in self.ep_in {
+                if let Some(ep) = ep {}
+            }
         }
 
         trace!("enabled");
@@ -463,40 +539,19 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                     w.set_fd(64);
                 });
 
-                // Flush fifos
-                r.grstctl().write(|w| {
+                // Flush RX/TX FIFO's
+                r.grstctl().modify(|w| {
                     w.set_rxfflsh(true);
                     w.set_txfflsh(true);
+                    w.set_txfnum(0b10000); // flush all
                 });
-                loop {
-                    let g = r.grstctl().read();
-                    if !g.rxfflsh() && !g.txfflsh() {
-                        break;
-                    }
-                }
+                while {
+                    let reg = r.grstctl().read();
+                    reg.rxfflsh() || reg.txfflsh()
+                } {}
 
                 // Enable EP IRQs
                 r.daintmsk().write_value(regs::Daintmsk(0xFFFF_FFFF));
-
-                // Configure control pipe
-                r.dieptsiz(0).write(|w| {
-                    w.set_pktcnt(0);
-                    w.set_xfrsiz(64);
-                });
-                r.diepctl(0).write(|w| {
-                    w.set_mpsiz(0b00); // 64 byte
-                    w.set_snak(true);
-                });
-                r.doeptsiz(0).write(|w| {
-                    w.set_rxdpid_stupcnt(1);
-                    w.set_pktcnt(1);
-                    w.set_xfrsiz(64);
-                });
-                r.doepctl(0).write(|w| {
-                    w.set_mpsiz(0b00); // 64 byte
-                    w.set_epena(true);
-                    w.set_cnak(true);
-                });
 
                 r.gintsts().write(|w| w.set_enumdne(true)); // clear
                 Self::restore_irqs();
@@ -522,28 +577,79 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
     #[inline]
     fn set_address(&mut self, addr: u8) {
-        let regs = T::regs();
         trace!("setting addr: {}", addr);
-        // TODO
+        unsafe {
+            T::regs().dcfg().modify(|w| {
+                w.set_dad(addr);
+            });
+        }
     }
 
     fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
-        // TODO
+        trace!("endpoint_set_stalled: {:x} {}", ep_addr, stalled);
+
+        if ep_addr.index() >= T::ENDPOINT_COUNT {
+            warn!("endpoint_set_stalled index {} out of range", ep_addr.index());
+            return;
+        }
+
+        let regs = T::regs();
+        match ep_addr.direction() {
+            Direction::Out => unsafe {
+                regs.doepctl(ep_addr.index()).modify(|w| {
+                    w.set_stall(stalled);
+                });
+                T::state().ep_out_wakers[ep_addr.index()].wake();
+            },
+            Direction::In => unsafe {
+                regs.diepctl(ep_addr.index()).modify(|w| {
+                    w.set_stall(stalled);
+                });
+                T::state().ep_in_wakers[ep_addr.index()].wake();
+            },
+        }
     }
 
     fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
-        // TODO
-        false
+        if ep_addr.index() >= T::ENDPOINT_COUNT {
+            warn!("endpoint_is_stalled index {} out of range", ep_addr.index());
+            return true;
+        }
+
+        let regs = T::regs();
+        match ep_addr.direction() {
+            Direction::Out => unsafe { regs.doepctl(ep_addr.index()).read().stall() },
+            Direction::In => unsafe { regs.diepctl(ep_addr.index()).read().stall() },
+        }
     }
 
     fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
         trace!("set_enabled {:x} {}", ep_addr, enabled);
-        // TODO
+
+        if ep_addr.index() >= T::ENDPOINT_COUNT {
+            warn!("endpoint_set_enabled index {} out of range", ep_addr.index());
+            return;
+        }
+
+        let regs = T::regs();
+        match ep_addr.direction() {
+            Direction::Out => unsafe { regs.doepctl(ep_addr.index()).modify(|w| w.set_epena(enabled)) },
+            Direction::In => unsafe { regs.diepctl(ep_addr.index()).modify(|w| w.set_epena(enabled)) },
+        }
     }
 
-    async fn enable(&mut self) {}
+    async fn enable(&mut self) {
+        trace!("enable");
+    }
 
-    async fn disable(&mut self) {}
+    async fn disable(&mut self) {
+        trace!("disable");
+    }
+
+    fn force_reset(&mut self) -> Result<(), Unsupported> {
+        trace!("force_reset");
+        Err(Unsupported)
+    }
 
     async fn remote_wakeup(&mut self) -> Result<(), Unsupported> {
         Err(Unsupported)
@@ -701,5 +807,14 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
 
         // TODO
         poll_fn(|_| Poll::<()>::Pending).await;
+    }
+}
+
+fn to_eptyp(ep_type: EndpointType) -> vals::Eptyp {
+    match ep_type {
+        EndpointType::Control => vals::Eptyp::CONTROL,
+        EndpointType::Isochronous => vals::Eptyp::ISOCHRONOUS,
+        EndpointType::Bulk => vals::Eptyp::BULK,
+        EndpointType::Interrupt => vals::Eptyp::INTERRUPT,
     }
 }
