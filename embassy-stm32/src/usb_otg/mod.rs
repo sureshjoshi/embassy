@@ -7,12 +7,19 @@ use embassy_cortex_m::interrupt::Interrupt;
 #[cfg(feature = "nightly")]
 pub use usb::*;
 
+// Using Instance::ENDPOINT_COUNT requires feature(const_generic_expr)
+const MAX_EP_COUNT: usize = 8;
+
 pub(crate) mod sealed {
+    use super::*;
+
     pub trait Instance {
-        fn regs() -> crate::pac::otgfs::OtgFs;
         const HIGH_SPEED: bool;
-        const FIFO_DEPTH_WORDS: usize;
+        const FIFO_DEPTH_WORDS: u16;
         const ENDPOINT_COUNT: usize;
+
+        fn regs() -> crate::pac::otgfs::OtgFs;
+        fn state() -> &'static State<MAX_EP_COUNT>;
     }
 }
 
@@ -41,14 +48,11 @@ pin_trait!(UlpiD7Pin, Instance);
 foreach_interrupt!(
     ($inst:ident, otgfs, $block:ident, GLOBAL, $irq:ident) => {
         impl sealed::Instance for peripherals::$inst {
-            fn regs() -> crate::pac::otgfs::OtgFs {
-                crate::pac::$inst
-            }
             const HIGH_SPEED: bool = false;
 
             cfg_if::cfg_if! {
                 if #[cfg(stm32f1)] {
-                    const FIFO_DEPTH_WORDS: usize = 128;
+                    const FIFO_DEPTH_WORDS: u16 = 128;
                     const ENDPOINT_COUNT: usize = 8;
                 } else if #[cfg(any(
                     stm32f2,
@@ -63,7 +67,7 @@ foreach_interrupt!(
                     stm32f437,
                     stm32f439,
                 ))] {
-                    const FIFO_DEPTH_WORDS: usize = 320;
+                    const FIFO_DEPTH_WORDS: u16 = 320;
                     const ENDPOINT_COUNT: usize = 4;
                 } else if #[cfg(any(
                     stm32f412,
@@ -76,14 +80,23 @@ foreach_interrupt!(
                     stm32l4,
                     stm32u5,
                 ))] {
-                    const FIFO_DEPTH_WORDS: usize = 320;
+                    const FIFO_DEPTH_WORDS: u16 = 320;
                     const ENDPOINT_COUNT: usize = 6;
                 } else if #[cfg(stm32g0x1)] {
-                    const FIFO_DEPTH_WORDS: usize = 512;
+                    const FIFO_DEPTH_WORDS: u16 = 512;
                     const ENDPOINT_COUNT: usize = 8;
                 } else {
                     compile_error!("USB_OTG_FS peripheral is not supported by this chip.");
                 }
+            }
+
+            fn regs() -> crate::pac::otgfs::OtgFs {
+                crate::pac::$inst
+            }
+
+            fn state() -> &'static State<MAX_EP_COUNT> {
+                static STATE: State<MAX_EP_COUNT> = State::new();
+                &STATE
             }
         }
 
@@ -94,10 +107,7 @@ foreach_interrupt!(
 
     ($inst:ident, otghs, $block:ident, GLOBAL, $irq:ident) => {
         impl sealed::Instance for peripherals::$inst {
-            fn regs() -> crate::pac::otgfs::OtgFs {
-                crate::pac::USB_OTG_FS
-            }
-            const HIGH_SPEED: bool = false;
+            const HIGH_SPEED: bool = true;
 
             cfg_if::cfg_if! {
                 if #[cfg(any(
@@ -111,7 +121,7 @@ foreach_interrupt!(
                     stm32f437,
                     stm32f439,
                 ))] {
-                    const FIFO_DEPTH_WORDS: usize = 1024;
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
                     const ENDPOINT_COUNT: usize = 6;
                 } else if #[cfg(any(
                     stm32f446,
@@ -120,11 +130,21 @@ foreach_interrupt!(
                     stm32f7,
                     stm32h7,
                 ))] {
-                    const FIFO_DEPTH_WORDS: usize = 1024;
+                    const FIFO_DEPTH_WORDS: u16 = 1024;
                     const ENDPOINT_COUNT: usize = 9;
                 } else {
                     compile_error!("USB_OTG_HS peripheral is not supported by this chip.");
                 }
+            }
+
+            fn regs() -> crate::pac::otgfs::OtgFs {
+                // OTG HS registers are a superset of FS registers
+                crate::pac::otgfs::OtgFs(crate::pac::$inst.0)
+            }
+
+            fn state() -> &'static State<MAX_EP_COUNT> {
+                static STATE: State<MAX_EP_COUNT> = State::new();
+                &STATE
             }
         }
 

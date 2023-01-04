@@ -14,12 +14,12 @@ use crate::gpio::sealed::AFType;
 use crate::pac::otgfs::{regs, vals};
 use crate::rcc::sealed::RccPeripheral;
 
-const EP_COUNT: usize = 6; // TODO unhardcode
+// const EP_COUNT: usize = 6; // TODO unhardcode
 
-const NEW_AW: AtomicWaker = AtomicWaker::new();
-static BUS_WAKER: AtomicWaker = AtomicWaker::new();
-static EP_IN_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
-static EP_OUT_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
+// const NEW_AW: AtomicWaker = AtomicWaker::new();
+// static BUS_WAKER: AtomicWaker = AtomicWaker::new();
+// static EP_IN_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
+// static EP_OUT_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
 
 macro_rules! config_ulpi_pins {
     ($($pin:ident),*) => {
@@ -34,6 +34,12 @@ macro_rules! config_ulpi_pins {
         })
     };
 }
+
+// From `synopsys-usb-otg` crate:
+// This calculation doesn't correspond to one in a Reference Manual.
+// In fact, the required number of words is higher than indicated in RM.
+// The following numbers are pessimistic and were figured out empirically.
+const RX_FIFO_EXTRA_SIZE_WORDS: u16 = 30;
 
 /// USB PHY type
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -50,8 +56,34 @@ pub enum PhyType {
     ExternalHighSpeed,
 }
 
+pub struct State<const EP_COUNT: usize> {
+    ep_in_wakers: [AtomicWaker; EP_COUNT],
+    ep_out_wakers: [AtomicWaker; EP_COUNT],
+    bus_waker: AtomicWaker,
+}
+
+impl<const EP_COUNT: usize> State<EP_COUNT> {
+    pub const fn new() -> Self {
+        const NEW_AW: AtomicWaker = AtomicWaker::new();
+
+        Self {
+            ep_in_wakers: [NEW_AW; EP_COUNT],
+            ep_out_wakers: [NEW_AW; EP_COUNT],
+            bus_waker: NEW_AW,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EndpointData {
+    ep_type: EndpointType,
+    size_words: u16,
+}
+
 pub struct Driver<'d, T: Instance> {
     phantom: PhantomData<&'d mut T>,
+    ep_in: [Option<EndpointData>; MAX_EP_COUNT],
+    ep_out: [Option<EndpointData>; MAX_EP_COUNT],
     _phy_type: PhyType,
 }
 
@@ -91,7 +123,7 @@ impl<'d, T: Instance> Driver<'d, T> {
 
             // Configure as device.
             r.gusbcfg().write(|w| {
-                w.set_fdmod(true);
+                w.set_fdmod(true); // Force device mode
                 w.set_physel(true); // internal FS PHY
             });
 
@@ -100,14 +132,38 @@ impl<'d, T: Instance> Driver<'d, T> {
             r.grstctl().write(|w| w.set_csrst(true));
             while r.grstctl().read().csrst() {}
 
-            r.gccfg().write(|w| {
-                w.set_pwrdwn(true); // FS PHY enabled.
+            // Enable internal USB transceiver
+            r.gccfg().modify(|w| {
+                w.set_pwrdwn(true);
             });
 
-            // BVALOVAL=1, BVALOEN=1
-            r.gotgctl().write(|w| w.0 = 0x00c0);
+            // Configuring Vbus sense and SOF output
+            match core_id {
+                0x0000_1200 | 0x0000_1100 => {
+                    // F429-like chips have the GCCFG.NOVBUSSENS bit
+                    r.gccfg().modify(|w| {
+                        w.set_novbussens(true);
+                        w.set_vbusasen(false);
+                        w.set_vbusbsen(false);
+                        w.set_sofouten(false);
+                    });
+                }
+                0x0000_2000 | 0x0000_2100 | 0x0000_2300 | 0x0000_3000 | 0x0000_3100 => {
+                    // F446-like chips have the GCCFG.VBDEN bit with the opposite meaning
+                    r.gccfg().modify(|w| {
+                        w.set_vbden(false);
+                    });
 
-            // Enable PHY clk.
+                    // Force B-peripheral session
+                    r.gotgctl().modify(|w| {
+                        w.set_bvaloen(true);
+                        w.set_bvaloval(true);
+                    });
+                }
+                _ => defmt::unimplemented!("Unknown USB core id {:X}", core_id),
+            }
+
+            // Enable PHY clock
             r.pcgcctl().write(|w| {
                 w.set_stppclk(false);
             });
@@ -117,18 +173,22 @@ impl<'d, T: Instance> Driver<'d, T> {
 
             // Set speed.
             r.dcfg().write(|w| {
-                w.set_pfivl(0);
-                w.set_dspd(0b11); // FS
+                w.set_pfivl(vals::Pfivl::FRAME_INTERVAL_80);
+                w.set_dspd(vals::Dspd::FULL_SPEED_INTERNAL);
             });
 
-            // setup irqs
-            r.gintsts().write_value(regs::Gintsts(0xFFFF_FFFF)); // clear all
+            // Unmask transfer complete EP interrupt
             r.diepmsk().write(|w| {
                 w.set_xfrcm(true);
             });
+
+            // Unmask and clear core interrupts
             Bus::<T>::restore_irqs();
+            r.gintsts().write_value(regs::Gintsts(0xFFFF_FFFF));
+
+            // Unmask global interrupt
             r.gahbcfg().write(|w| {
-                w.set_gint(true);
+                w.set_gint(true); // unmask global interrupt
             });
 
             // Connect
@@ -137,6 +197,8 @@ impl<'d, T: Instance> Driver<'d, T> {
 
         Self {
             phantom: PhantomData,
+            ep_in: [None; MAX_EP_COUNT],
+            ep_out: [None; MAX_EP_COUNT],
             _phy_type: PhyType::InternalFullSpeed,
         }
     }
@@ -164,22 +226,25 @@ impl<'d, T: Instance> Driver<'d, T> {
 
         Self {
             phantom: PhantomData,
+            ep_in: [None; MAX_EP_COUNT],
+            ep_out: [None; MAX_EP_COUNT],
             _phy_type: PhyType::ExternalHighSpeed,
         }
     }
 
     fn on_interrupt(_: *mut ()) {
         unsafe {
+            trace!("USB IRQ");
             let r = T::regs();
             let ints = r.gintsts().read();
             if ints.wkupint() || ints.usbsusp() || ints.usbrst() || ints.enumdne() {
                 r.gintmsk().write(|_| {});
-                BUS_WAKER.wake();
+                T::state().bus_waker.wake();
             }
 
             if ints.rxflvl() {
-                let x = r.grxstsp_device().read();
-                match x.pktsts() {
+                let x = r.grxstsp().read();
+                match x.pktstsd() {
                     vals::Pktstsd::OUT_NAK => trace!("OUT_NAK"),
                     vals::Pktstsd::OUT_DATA_RX => trace!("OUT_DATA_RX"),
                     vals::Pktstsd::OUT_DATA_DONE => trace!("OUT_DATA_DONE"),
@@ -189,6 +254,25 @@ impl<'d, T: Instance> Driver<'d, T> {
                 }
             }
         }
+    }
+
+    fn rx_fifo_size_words(&self) -> u16 {
+        self.ep_in
+            .iter()
+            .map(|ep| ep.map(|ep| ep.size_words).unwrap_or(0))
+            .sum()
+    }
+
+    fn tx_fifo_size_words(&self) -> u16 {
+        self.ep_out
+            .iter()
+            .map(|ep| ep.map(|ep| ep.size_words).unwrap_or(0))
+            .sum()
+    }
+
+    // Returns total amount of words (u32) allocated in dedicated FIFO
+    fn allocated_fifo_words(&self) -> u16 {
+        RX_FIFO_EXTRA_SIZE_WORDS + self.rx_fifo_size_words() + self.tx_fifo_size_words()
     }
 
     fn alloc_endpoint<D: Dir>(
@@ -205,7 +289,39 @@ impl<'d, T: Instance> Driver<'d, T> {
             D::dir()
         );
 
-        let index = 0;
+        let size_words = (max_packet_size + 3) / 4;
+        if size_words + self.allocated_fifo_words() > T::FIFO_DEPTH_WORDS {
+            error!("Not enough FIFO capacity");
+            return Err(EndpointAllocError);
+        }
+
+        let eps = if D::dir() == Direction::In {
+            &mut self.ep_in
+        } else {
+            &mut self.ep_out
+        };
+
+        // Find free endpoint slot
+        let slot = eps.iter_mut().enumerate().find(|(i, ep)| {
+            if *i == 0 && ep_type != EndpointType::Control {
+                // reserved for control pipe
+                false
+            } else {
+                ep.is_none()
+            }
+        });
+
+        let index = match slot {
+            Some((index, ep)) => {
+                *ep = Some(EndpointData { ep_type, size_words });
+                index
+            }
+            None => {
+                error!("No free endpoints available");
+                return Err(EndpointAllocError);
+            }
+        };
+
         trace!("  index={}", index);
 
         Ok(Endpoint {
@@ -254,6 +370,35 @@ impl<'d, T: Instance> embassy_usb_driver::Driver<'d> for Driver<'d, T> {
         assert_eq!(ep_out.info.addr.index(), 0);
         assert_eq!(ep_in.info.addr.index(), 0);
 
+        let r = T::regs();
+
+        unsafe {
+            let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + self.rx_fifo_size_words();
+            r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words));
+            trace!("configuring rx fifo size={}", rx_fifo_size_words);
+
+            let mut fifo_top = rx_fifo_size_words;
+            for i in 0..T::ENDPOINT_COUNT {
+                let ep_size_words = self.ep_out[i].map(|ep| ep.size_words).unwrap_or(0);
+                trace!(
+                    "configuring tx fifo ep={}, offset={}, size={}",
+                    i,
+                    fifo_top,
+                    ep_size_words
+                );
+
+                let dieptxf = if i == 0 { r.dieptxf0() } else { r.dieptxf(i - 1) };
+                dieptxf.write(|w| {
+                    w.set_fd(ep_size_words);
+                    w.set_sa(fifo_top);
+                });
+
+                fifo_top += ep_size_words;
+            }
+
+            assert!(fifo_top <= T::FIFO_DEPTH_WORDS);
+        }
+
         trace!("enabled");
 
         (
@@ -281,7 +426,7 @@ impl<'d, T: Instance> Bus<'d, T> {
                 w.set_enumdnem(true);
                 w.set_usbsuspm(true);
                 w.set_wuim(true);
-                //w.set_iepint(true);
+                w.set_iepint(true);
                 w.set_rxflvlm(true);
             });
         }
@@ -293,16 +438,15 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
         poll_fn(move |cx| unsafe {
             let r = T::regs();
 
-            BUS_WAKER.register(cx.waker());
+            T::state().bus_waker.register(cx.waker());
 
             let ints = r.gintsts().read();
             if ints.usbrst() {
                 trace!("reset");
 
                 // Deconfigure everything.
-                r.diepctl0().write(|w| w.set_epdis(true));
-                for i in 1..EP_COUNT {
-                    r.diepctl(i - 1).write(|w| w.set_epdis(true));
+                for i in 0..T::ENDPOINT_COUNT {
+                    r.diepctl(i).write(|w| w.set_epdis(true));
                 }
 
                 r.gintsts().write(|w| w.set_usbrst(true)); // clear
@@ -335,20 +479,20 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                 r.daintmsk().write_value(regs::Daintmsk(0xFFFF_FFFF));
 
                 // Configure control pipe
-                r.dieptsiz0().write(|w| {
+                r.dieptsiz(0).write(|w| {
                     w.set_pktcnt(0);
                     w.set_xfrsiz(64);
                 });
-                r.diepctl0().write(|w| {
+                r.diepctl(0).write(|w| {
                     w.set_mpsiz(0b00); // 64 byte
                     w.set_snak(true);
                 });
-                r.doeptsiz0().write(|w| {
-                    w.set_stupcnt(1);
-                    w.set_pktcnt(true);
+                r.doeptsiz(0).write(|w| {
+                    w.set_rxdpid_stupcnt(1);
+                    w.set_pktcnt(1);
                     w.set_xfrsiz(64);
                 });
-                r.doepctl0().write(|w| {
+                r.doepctl(0).write(|w| {
                     w.set_mpsiz(0b00); // 64 byte
                     w.set_epena(true);
                     w.set_cnak(true);
@@ -408,7 +552,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
 trait Dir {
     fn dir() -> Direction;
-    fn waker(i: usize) -> &'static AtomicWaker;
+    // fn waker(i: usize) -> &'static AtomicWaker;
 }
 
 pub enum In {}
@@ -417,10 +561,10 @@ impl Dir for In {
         Direction::In
     }
 
-    #[inline]
-    fn waker(i: usize) -> &'static AtomicWaker {
-        &EP_IN_WAKERS[i]
-    }
+    // #[inline]
+    // fn waker(i: usize) -> &'static AtomicWaker {
+    //     &EP_IN_WAKERS[i]
+    // }
 }
 
 pub enum Out {}
@@ -429,10 +573,10 @@ impl Dir for Out {
         Direction::Out
     }
 
-    #[inline]
-    fn waker(i: usize) -> &'static AtomicWaker {
-        &EP_OUT_WAKERS[i]
-    }
+    // #[inline]
+    // fn waker(i: usize) -> &'static AtomicWaker {
+    //     &EP_OUT_WAKERS[i]
+    // }
 }
 
 pub struct Endpoint<'d, T: Instance, D> {
