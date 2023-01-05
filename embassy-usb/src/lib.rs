@@ -656,7 +656,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
                         buf[1] = descriptor_type::STRING;
                         let mut pos = 2;
                         for c in s.encode_utf16() {
-                            if pos >= buf.len() {
+                            if pos + 2 >= buf.len() {
                                 panic!("control buffer too small");
                             }
 
