@@ -2,7 +2,7 @@ use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::task::Poll;
 
-use atomic_polyfill::{AtomicBool, Ordering};
+use atomic_polyfill::{AtomicBool, AtomicU16, Ordering};
 use embassy_cortex_m::interrupt::InterruptExt;
 use embassy_hal_common::{into_ref, Peripheral};
 use embassy_sync::waitqueue::AtomicWaker;
@@ -61,11 +61,12 @@ pub enum PhyType {
 }
 
 pub struct State<const EP_COUNT: usize> {
+    ep0_setup_data: UnsafeCell<[u8; 8]>,
+    ep0_setup_ready: AtomicBool,
     ep_in_wakers: [AtomicWaker; EP_COUNT],
     ep_out_wakers: [AtomicWaker; EP_COUNT],
     ep_out_buffers: [UnsafeCell<*mut u8>; EP_COUNT],
-    ep_out_size: [UnsafeCell<u16>; EP_COUNT],
-    ep_out_ready: [AtomicBool; EP_COUNT],
+    ep_out_size: [AtomicU16; EP_COUNT],
     bus_waker: AtomicWaker,
 }
 
@@ -76,15 +77,15 @@ impl<const EP_COUNT: usize> State<EP_COUNT> {
     pub const fn new() -> Self {
         const NEW_AW: AtomicWaker = AtomicWaker::new();
         const NEW_BUF: UnsafeCell<*mut u8> = UnsafeCell::new(0 as _);
-        const NEW_SIZE: UnsafeCell<u16> = UnsafeCell::new(0);
-        const NEW_BOOL: AtomicBool = AtomicBool::new(false);
+        const NEW_SIZE: AtomicU16 = AtomicU16::new(u16::MAX);
 
         Self {
+            ep0_setup_data: UnsafeCell::new([0u8; 8]),
+            ep0_setup_ready: AtomicBool::new(false),
             ep_in_wakers: [NEW_AW; EP_COUNT],
             ep_out_wakers: [NEW_AW; EP_COUNT],
             ep_out_buffers: [NEW_BUF; EP_COUNT],
             ep_out_size: [NEW_SIZE; EP_COUNT],
-            ep_out_ready: [NEW_BOOL; EP_COUNT],
             bus_waker: NEW_AW,
         }
     }
@@ -186,27 +187,70 @@ impl<'d, T: Instance> Driver<'d, T> {
 
                 assert!(ep_num < T::ENDPOINT_COUNT);
 
-                if state.ep_out_ready[ep_num].load(Ordering::Acquire) == false {
-                    let buf = core::slice::from_raw_parts_mut(*state.ep_out_buffers[ep_num].get(), len);
+                match status.pktstsd() {
+                    vals::Pktstsd::SETUP_DATA_RX => {
+                        trace!("SETUP received");
+                        assert!(len == 8, "invalid SETUP packet length={}", len);
+                        assert!(ep_num == 0, "invalid SETUP packet endpoint={}", ep_num);
 
-                    for chunk in buf.chunks_mut(4) {
-                        // RX FIFO is shared
-                        let data = r.fifo(0).read().data();
-                        chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
+                        if state.ep0_setup_ready.load(Ordering::Relaxed) == false {
+                            let data = &mut *state.ep0_setup_data.get();
+                            data[0..4].copy_from_slice(&r.fifo(0).read().data().to_ne_bytes());
+                            data[4..8].copy_from_slice(&r.fifo(0).read().data().to_ne_bytes());
+                        } else {
+                            warn!("received SETUP before previous finished processing");
+                            // discard FIFO
+                            r.fifo(0).read();
+                            r.fifo(0).read();
+                        }
                     }
+                    vals::Pktstsd::OUT_DATA_RX => {
+                        trace!("irq data rx ep={} len={}", ep_num, len);
 
-                    *state.ep_out_size[ep_num].get() = len as u16;
+                        if state.ep_out_size[ep_num].load(Ordering::Acquire) == u16::MAX {
+                            let buf = core::slice::from_raw_parts_mut(*state.ep_out_buffers[ep_num].get(), len);
 
-                    state.ep_out_ready[ep_num].store(true, Ordering::Release);
-                    state.ep_out_wakers[ep_num].wake();
-                } else {
-                    warn!("ep_out buffer overflow index={}", ep_num);
+                            for chunk in buf.chunks_mut(4) {
+                                // RX FIFO is shared
+                                let data = r.fifo(0).read().data();
+                                chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
+                            }
 
-                    // discard FIFO data
-                    let len_words = (len + 3) / 4;
-                    for _ in 0..len_words {
-                        r.fifo(0).read().data();
+                            state.ep_out_size[ep_num].store(len as u16, Ordering::Release);
+                            state.ep_out_wakers[ep_num].wake();
+                        } else {
+                            warn!("ep_out buffer overflow index={}", ep_num);
+
+                            // discard FIFO data
+                            let len_words = (len + 3) / 4;
+                            for _ in 0..len_words {
+                                r.fifo(0).read().data();
+                            }
+                        }
                     }
+                    vals::Pktstsd::OUT_DATA_DONE => {
+                        trace!("irq data done ep={}", ep_num);
+                        let core_id = r.cid().read().product_id();
+                        if core_id == 0x0000_1200 || core_id == 0x0000_1100 {
+                            r.doepctl(ep_num).modify(|w| {
+                                w.set_cnak(true);
+                                w.set_epena(true);
+                            });
+                        }
+                    }
+                    vals::Pktstsd::SETUP_DATA_DONE => {
+                        trace!("irq setup done ep={}", ep_num);
+                        let core_id = r.cid().read().product_id();
+                        if core_id == 0x0000_1200 || core_id == 0x0000_1100 {
+                            r.doepctl(ep_num).modify(|w| {
+                                w.set_cnak(true);
+                                w.set_epena(true);
+                            });
+                        }
+                        state.ep0_setup_ready.store(true, Ordering::Release);
+                        state.ep_out_wakers[0].wake();
+                    }
+                    x => trace!("unknown PKTSTS: {}", x.0),
                 }
             }
 
@@ -599,16 +643,6 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
         .await
     }
 
-    #[inline]
-    fn set_address(&mut self, addr: u8) {
-        trace!("setting addr: {}", addr);
-        unsafe {
-            T::regs().dcfg().modify(|w| {
-                w.set_dad(addr);
-            });
-        }
-    }
-
     fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
         trace!("endpoint_set_stalled: {:x} {}", ep_addr, stalled);
 
@@ -849,19 +883,26 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointOut for Endpoint<'d, T, Out> {
 
             state.ep_out_wakers[index].register(cx.waker());
 
-            if state.ep_out_ready[index].load(Ordering::Acquire) {
+            let len = state.ep_out_size[index].load(Ordering::Acquire);
+            if len != u16::MAX {
                 unsafe {
-                    let len = *state.ep_out_size[index].get() as usize;
-                    let data = core::slice::from_raw_parts(*state.ep_out_buffers[index].get(), len);
+                    let data = core::slice::from_raw_parts(*state.ep_out_buffers[index].get(), len as usize);
 
                     trace!("READ OK, rx_len = {}", len);
-                    buf.copy_from_slice(data);
+                    buf[..len as usize].copy_from_slice(data);
 
-                    state.ep_out_ready[index].store(false, Ordering::Release);
+                    state.ep_out_size[index].store(u16::MAX, Ordering::Release);
 
-                    return Poll::Ready(Ok(len));
+                    return Poll::Ready(Ok(len as usize));
                 }
             }
+
+            critical_section::with(|_| unsafe {
+                T::regs().doepctl(index).modify(|w| {
+                    w.set_cnak(true);
+                    w.set_epena(true);
+                })
+            });
 
             Poll::Pending
         })
@@ -941,52 +982,73 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
     }
 
     async fn setup(&mut self) -> [u8; 8] {
-        loop {
-            trace!("SETUP read waiting");
+        poll_fn(|cx| {
+            let state = T::state();
 
-            let mut buf = [0; 8];
-            match self.ep_out.read(&mut buf).await {
-                Ok(len) => {
-                    if len == buf.len() {
-                        trace!("SETUP read ok");
-                        return buf;
-                    } else {
-                        error!("SETUP read incorrect size={}", len);
-                    }
-                }
-                Err(e) => {
-                    error!("SETUP read error: {:?}", e);
-                }
+            state.ep_out_wakers[0].register(cx.waker());
+
+            if state.ep0_setup_ready.load(Ordering::Relaxed) {
+                let data = unsafe { *state.ep0_setup_data.get() };
+                state.ep0_setup_ready.store(false, Ordering::Release);
+
+                trace!("SETUP received: {:?}", data);
+                Poll::Ready(data)
+            } else {
+                trace!("SETUP waiting");
+                Poll::Pending
             }
-        }
+        })
+        .await
     }
 
     async fn data_out(&mut self, buf: &mut [u8], first: bool, last: bool) -> Result<usize, EndpointError> {
         trace!("control: data_out");
-        self.ep_out.read(buf).await
+        let len = self.ep_out.read(buf).await?;
+        trace!("control: data_out read: {:?}", buf[..len]);
+        Ok(len)
     }
 
     async fn data_in(&mut self, data: &[u8], first: bool, last: bool) -> Result<(), EndpointError> {
-        trace!("control: data_in");
-        self.ep_in.write(data).await
+        trace!("control: data_in write: {:?}", data);
+        self.ep_in.write(data).await?;
+        trace!("control: data_in waiting for status");
+        self.ep_out.read(&mut []).await?;
+        trace!("control: complete");
+        Ok(())
     }
 
     async fn accept(&mut self) {
-        let regs = T::regs();
         trace!("control: accept");
 
-        // TODO
-        poll_fn(|_| Poll::<()>::Pending).await;
+        self.ep_in.write(&[]).await.ok();
 
         trace!("control: accept OK");
     }
 
     async fn reject(&mut self) {
-        let regs = T::regs();
         trace!("control: reject");
 
-        // TODO
-        poll_fn(|_| Poll::<()>::Pending).await;
+        unsafe {
+            let regs = T::regs();
+            regs.diepctl(self.ep_in.info.addr.index()).modify(|w| {
+                w.set_stall(true);
+            });
+            regs.doepctl(self.ep_out.info.addr.index()).modify(|w| {
+                w.set_stall(true);
+            });
+        }
+    }
+
+    async fn accept_set_address(&mut self, addr: u8) {
+        trace!("setting addr: {}", addr);
+        unsafe {
+            T::regs().dcfg().modify(|w| {
+                w.set_dad(addr);
+            });
+        }
+
+        // synopsys driver requires accept to be sent after changing address
+        self.accept().await
     }
 }
 
