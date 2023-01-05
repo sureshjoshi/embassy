@@ -45,6 +45,8 @@ macro_rules! config_ulpi_pins {
 // The following numbers are pessimistic and were figured out empirically.
 const RX_FIFO_EXTRA_SIZE_WORDS: u16 = 30;
 
+const EP_OUT_BUFFER_EMPTY: u16 = u16::MAX;
+
 /// USB PHY type
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PhyType {
@@ -77,7 +79,7 @@ impl<const EP_COUNT: usize> State<EP_COUNT> {
     pub const fn new() -> Self {
         const NEW_AW: AtomicWaker = AtomicWaker::new();
         const NEW_BUF: UnsafeCell<*mut u8> = UnsafeCell::new(0 as _);
-        const NEW_SIZE: AtomicU16 = AtomicU16::new(u16::MAX);
+        const NEW_SIZE: AtomicU16 = AtomicU16::new(EP_OUT_BUFFER_EMPTY);
 
         Self {
             ep0_setup_data: UnsafeCell::new([0u8; 8]),
@@ -95,6 +97,7 @@ impl<const EP_COUNT: usize> State<EP_COUNT> {
 struct EndpointData {
     ep_type: EndpointType,
     max_packet_size: u16,
+    fifo_size_words: u16,
 }
 
 pub struct Driver<'d, T: Instance> {
@@ -197,6 +200,8 @@ impl<'d, T: Instance> Driver<'d, T> {
                             let data = &mut *state.ep0_setup_data.get();
                             data[0..4].copy_from_slice(&r.fifo(0).read().data().to_ne_bytes());
                             data[4..8].copy_from_slice(&r.fifo(0).read().data().to_ne_bytes());
+                            state.ep0_setup_ready.store(true, Ordering::Release);
+                            state.ep_out_wakers[0].wake();
                         } else {
                             warn!("received SETUP before previous finished processing");
                             // discard FIFO
@@ -207,7 +212,7 @@ impl<'d, T: Instance> Driver<'d, T> {
                     vals::Pktstsd::OUT_DATA_RX => {
                         trace!("irq data rx ep={} len={}", ep_num, len);
 
-                        if state.ep_out_size[ep_num].load(Ordering::Acquire) == u16::MAX {
+                        if state.ep_out_size[ep_num].load(Ordering::Acquire) == EP_OUT_BUFFER_EMPTY {
                             let buf = core::slice::from_raw_parts_mut(*state.ep_out_buffers[ep_num].get(), len);
 
                             for chunk in buf.chunks_mut(4) {
@@ -230,25 +235,9 @@ impl<'d, T: Instance> Driver<'d, T> {
                     }
                     vals::Pktstsd::OUT_DATA_DONE => {
                         trace!("irq data done ep={}", ep_num);
-                        let core_id = r.cid().read().product_id();
-                        if core_id == 0x0000_1200 || core_id == 0x0000_1100 {
-                            r.doepctl(ep_num).modify(|w| {
-                                w.set_cnak(true);
-                                w.set_epena(true);
-                            });
-                        }
                     }
                     vals::Pktstsd::SETUP_DATA_DONE => {
                         trace!("irq setup done ep={}", ep_num);
-                        let core_id = r.cid().read().product_id();
-                        if core_id == 0x0000_1200 || core_id == 0x0000_1100 {
-                            r.doepctl(ep_num).modify(|w| {
-                                w.set_cnak(true);
-                                w.set_epena(true);
-                            });
-                        }
-                        state.ep0_setup_ready.store(true, Ordering::Release);
-                        state.ep_out_wakers[0].wake();
                     }
                     x => trace!("unknown PKTSTS: {}", x.0),
                 }
@@ -284,24 +273,25 @@ impl<'d, T: Instance> Driver<'d, T> {
                 }
             }
 
+            // not needed? handled in rxflvl
             // OUT endpoint interrupt
-            if ints.oepint() {
-                let mut ep_mask = r.daint().read().oepint();
-                let mut ep_num = 0;
+            // if ints.oepint() {
+            //     let mut ep_mask = r.daint().read().oepint();
+            //     let mut ep_num = 0;
 
-                while ep_mask != 0 {
-                    if ep_mask & 1 != 0 {
-                        let ep_ints = r.doepint(ep_num).read();
-                        // clear all
-                        r.doepint(ep_num).write_value(ep_ints);
-                        state.ep_out_wakers[ep_num].wake();
-                        trace!("out ep={} irq val={=u32:b}", ep_num, ep_ints.0);
-                    }
+            //     while ep_mask != 0 {
+            //         if ep_mask & 1 != 0 {
+            //             let ep_ints = r.doepint(ep_num).read();
+            //             // clear all
+            //             r.doepint(ep_num).write_value(ep_ints);
+            //             state.ep_out_wakers[ep_num].wake();
+            //             trace!("out ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+            //         }
 
-                    ep_mask >>= 1;
-                    ep_num += 1;
-                }
-            }
+            //         ep_mask >>= 1;
+            //         ep_num += 1;
+            //     }
+            // }
         }
     }
 
@@ -331,8 +321,14 @@ impl<'d, T: Instance> Driver<'d, T> {
             }
         };
 
-        let size_words = (max_packet_size + 3) / 4;
-        if size_words + self.allocated_fifo_words() > T::FIFO_DEPTH_WORDS {
+        let fifo_size_words = if D::dir() == Direction::Out {
+            (max_packet_size + 3) / 4
+        } else {
+            // INEPTXFD requires minimum of 16 words
+            u16::max((max_packet_size + 3) / 4, 16)
+        };
+
+        if fifo_size_words + self.allocated_fifo_words() > T::FIFO_DEPTH_WORDS {
             error!("Not enough FIFO capacity");
             return Err(EndpointAllocError);
         }
@@ -358,6 +354,7 @@ impl<'d, T: Instance> Driver<'d, T> {
                 *ep = Some(EndpointData {
                     ep_type,
                     max_packet_size,
+                    fifo_size_words,
                 });
                 index
             }
@@ -479,12 +476,6 @@ impl<'d, T: Instance> Bus<'d, T> {
             r.doepctl(i).modify(|w| w.set_snak(true));
         }
 
-        // Enable control endpoint 0 interrupts
-        r.daintmsk().modify(|w| {
-            w.set_iepm(1);
-            w.set_oepm(1);
-        });
-
         // Configure RX fifo size. All endpoints share the same FIFO area.
         let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + ep_fifo_size(&self.ep_out);
         r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words));
@@ -493,21 +484,22 @@ impl<'d, T: Instance> Bus<'d, T> {
         // Configure TX (USB in direction) fifo size for each endpoint
         let mut fifo_top = rx_fifo_size_words;
         for i in 0..T::ENDPOINT_COUNT {
-            let ep_size_words = self.ep_in[i].map(|ep| (ep.max_packet_size + 3) / 4).unwrap_or(0);
-            trace!(
-                "configuring tx fifo ep={}, offset={}, size={}",
-                i,
-                fifo_top,
-                ep_size_words
-            );
+            if let Some(ep) = self.ep_in[i] {
+                trace!(
+                    "configuring tx fifo ep={}, offset={}, size={}",
+                    i,
+                    fifo_top,
+                    ep.fifo_size_words
+                );
 
-            let dieptxf = if i == 0 { r.dieptxf0() } else { r.dieptxf(i - 1) };
-            dieptxf.write(|w| {
-                w.set_fd(ep_size_words);
-                w.set_sa(fifo_top);
-            });
+                let dieptxf = if i == 0 { r.dieptxf0() } else { r.dieptxf(i - 1) };
+                dieptxf.write(|w| {
+                    w.set_fd(ep.fifo_size_words);
+                    w.set_sa(fifo_top);
+                });
 
-            fifo_top += ep_size_words;
+                fifo_top += ep.fifo_size_words;
+            }
         }
 
         assert!(
@@ -533,7 +525,7 @@ impl<'d, T: Instance> Bus<'d, T> {
                     unsafe {
                         r.diepctl(index).write(|w| {
                             w.set_snak(true);
-                            w.set_usbaep(true);
+                            w.set_usbaep(false);
                             w.set_eptyp(to_eptyp(ep.ep_type));
                             w.set_sd0pid_sevnfrm(true);
                             w.set_txfnum(index as _);
@@ -566,8 +558,8 @@ impl<'d, T: Instance> Bus<'d, T> {
                         r.doepctl(index).write(|w| {
                             w.set_sd0pid_sevnfrm(true);
                             w.set_cnak(true);
-                            w.set_epena(true);
-                            w.set_usbaep(true);
+                            w.set_epena(false);
+                            w.set_usbaep(false);
                             w.set_eptyp(to_eptyp(ep.ep_type));
                             w.set_mpsiz(ep.max_packet_size);
                         });
@@ -579,7 +571,8 @@ impl<'d, T: Instance> Bus<'d, T> {
         // Enable IRQs for allocated endpoints
         r.daintmsk().modify(|w| {
             w.set_iepm(ep_irq_mask(&self.ep_in));
-            w.set_oepm(ep_irq_mask(&self.ep_out));
+            // OUT interrupts not used, handled in RXFLVL
+            // w.set_oepm(ep_irq_mask(&self.ep_out));
         });
 
         trace!("bus configure done");
@@ -603,6 +596,11 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                 trace!("reset");
 
                 self.configure();
+
+                // Reset address
+                r.dcfg().modify(|w| {
+                    w.set_dad(0);
+                });
 
                 r.gintsts().write(|w| w.set_usbrst(true)); // clear
                 Self::restore_irqs();
@@ -691,8 +689,20 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
         let regs = T::regs();
         match ep_addr.direction() {
-            Direction::Out => unsafe { regs.doepctl(ep_addr.index()).modify(|w| w.set_epena(enabled)) },
-            Direction::In => unsafe { regs.diepctl(ep_addr.index()).modify(|w| w.set_epena(enabled)) },
+            Direction::Out => unsafe {
+                regs.doepctl(ep_addr.index()).modify(|w| {
+                    w.set_epena(enabled);
+                    w.set_usbaep(enabled);
+                    w.set_cnak(true);
+                })
+            },
+            Direction::In => unsafe {
+                regs.diepctl(ep_addr.index()).modify(|w| {
+                    w.set_epena(enabled);
+                    w.set_usbaep(enabled);
+                    w.set_cnak(true);
+                })
+            },
         }
     }
 
@@ -876,15 +886,14 @@ impl<'d, T: Instance> embassy_usb_driver::Endpoint for Endpoint<'d, T, Out> {
 impl<'d, T: Instance> embassy_usb_driver::EndpointOut for Endpoint<'d, T, Out> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, EndpointError> {
         trace!("READ WAITING, buf.len() = {}", buf.len());
-        // todo
         poll_fn(|cx| {
             let index = self.info.addr.index();
             let state = T::state();
 
             state.ep_out_wakers[index].register(cx.waker());
 
-            let len = state.ep_out_size[index].load(Ordering::Acquire);
-            if len != u16::MAX {
+            let len = state.ep_out_size[index].load(Ordering::Relaxed);
+            if len != EP_OUT_BUFFER_EMPTY {
                 unsafe {
                     let data = core::slice::from_raw_parts(*state.ep_out_buffers[index].get(), len as usize);
 
@@ -893,18 +902,18 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointOut for Endpoint<'d, T, Out> {
 
                     state.ep_out_size[index].store(u16::MAX, Ordering::Release);
 
-                    return Poll::Ready(Ok(len as usize));
+                    Poll::Ready(Ok(len as usize))
                 }
+            } else {
+                critical_section::with(|_| unsafe {
+                    T::regs().doepctl(index).modify(|w| {
+                        w.set_cnak(true);
+                        w.set_epena(true);
+                    })
+                });
+
+                Poll::Pending
             }
-
-            critical_section::with(|_| unsafe {
-                T::regs().doepctl(index).modify(|w| {
-                    w.set_cnak(true);
-                    w.set_epena(true);
-                })
-            });
-
-            Poll::Pending
         })
         .await
     }
@@ -995,25 +1004,38 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
                 Poll::Ready(data)
             } else {
                 trace!("SETUP waiting");
+
+                critical_section::with(|_| unsafe {
+                    T::regs().doepctl(self.ep_out.info.addr.index()).modify(|w| {
+                        w.set_cnak(true);
+                        w.set_epena(true);
+                    })
+                });
+
                 Poll::Pending
             }
         })
         .await
     }
 
-    async fn data_out(&mut self, buf: &mut [u8], first: bool, last: bool) -> Result<usize, EndpointError> {
+    async fn data_out(&mut self, buf: &mut [u8], _first: bool, _last: bool) -> Result<usize, EndpointError> {
         trace!("control: data_out");
         let len = self.ep_out.read(buf).await?;
         trace!("control: data_out read: {:?}", buf[..len]);
         Ok(len)
     }
 
-    async fn data_in(&mut self, data: &[u8], first: bool, last: bool) -> Result<(), EndpointError> {
+    async fn data_in(&mut self, data: &[u8], _first: bool, last: bool) -> Result<(), EndpointError> {
         trace!("control: data_in write: {:?}", data);
         self.ep_in.write(data).await?;
-        trace!("control: data_in waiting for status");
-        self.ep_out.read(&mut []).await?;
-        trace!("control: complete");
+
+        // wait for status response from host after sending the last packet
+        if last {
+            trace!("control: data_in waiting for status");
+            self.ep_out.read(&mut []).await?;
+            trace!("control: complete");
+        }
+
         Ok(())
     }
 
@@ -1062,9 +1084,7 @@ fn to_eptyp(ep_type: EndpointType) -> vals::Eptyp {
 }
 
 fn ep_fifo_size(eps: &[Option<EndpointData>]) -> u16 {
-    eps.iter()
-        .map(|ep| ep.map(|ep| (ep.max_packet_size + 3) / 4).unwrap_or(0))
-        .sum()
+    eps.iter().map(|ep| ep.map(|ep| ep.fifo_size_words).unwrap_or(0)).sum()
 }
 
 fn ep_irq_mask(eps: &[Option<EndpointData>]) -> u16 {
