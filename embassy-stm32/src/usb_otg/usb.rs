@@ -466,15 +466,10 @@ impl<'d, T: Instance> Bus<'d, T> {
 }
 
 impl<'d, T: Instance> Bus<'d, T> {
-    pub unsafe fn configure(&mut self) {
-        trace!("bus configure");
+    pub unsafe fn init_fifo(&mut self) {
+        trace!("init_fifo");
 
         let r = T::regs();
-
-        // Set NAK for all OUT endpoints
-        for i in 0..T::ENDPOINT_COUNT {
-            r.doepctl(i).modify(|w| w.set_snak(true));
-        }
 
         // Configure RX fifo size. All endpoints share the same FIFO area.
         let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + ep_fifo_size(&self.ep_out);
@@ -506,65 +501,40 @@ impl<'d, T: Instance> Bus<'d, T> {
             fifo_top <= T::FIFO_DEPTH_WORDS,
             "FIFO allocations exceeded maximum capacity"
         );
+    }
+
+    pub unsafe fn configure_endpoints(&mut self) {
+        trace!("configure_endpoints");
+
+        let r = T::regs();
 
         // Configure IN endpoints
         for (index, ep) in self.ep_in.iter().enumerate() {
             if let Some(ep) = ep {
-                if index == 0 {
-                    unsafe {
-                        r.diepctl(index).write(|w| {
-                            w.set_snak(true);
-                            w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
-                        });
-                        r.dieptsiz(index).write(|w| {
-                            w.set_pktcnt(0);
-                            w.set_xfrsiz(ep.max_packet_size as _);
-                        });
+                r.diepctl(index).write(|w| {
+                    if index == 0 {
+                        w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
+                    } else {
+                        w.set_mpsiz(ep.max_packet_size);
+                        w.set_eptyp(to_eptyp(ep.ep_type));
+                        w.set_sd0pid_sevnfrm(true);
                     }
-                } else {
-                    unsafe {
-                        r.diepctl(index).write(|w| {
-                            w.set_snak(true);
-                            w.set_usbaep(false);
-                            w.set_eptyp(to_eptyp(ep.ep_type));
-                            w.set_sd0pid_sevnfrm(true);
-                            w.set_txfnum(index as _);
-                            w.set_mpsiz(ep.max_packet_size);
-                        });
-                        // DIEPTSIZx is set during transfer
-                    }
-                }
+                });
             }
         }
 
         // Configure OUT endpoints
         for (index, ep) in self.ep_out.iter().enumerate() {
             if let Some(ep) = ep {
-                if index == 0 {
-                    unsafe {
-                        r.doepctl(index).write(|w| {
-                            w.set_cnak(true);
-                            w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
-                            w.set_epena(true);
-                        });
-                        r.doeptsiz(index).write(|w| {
-                            w.set_rxdpid_stupcnt(1);
-                            w.set_pktcnt(1);
-                            w.set_xfrsiz(ep.max_packet_size as _);
-                        });
+                r.doepctl(index).write(|w| {
+                    if index == 0 {
+                        w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
+                    } else {
+                        w.set_mpsiz(ep.max_packet_size);
+                        w.set_eptyp(to_eptyp(ep.ep_type));
+                        w.set_sd0pid_sevnfrm(true);
                     }
-                } else {
-                    unsafe {
-                        r.doepctl(index).write(|w| {
-                            w.set_sd0pid_sevnfrm(true);
-                            w.set_cnak(true);
-                            w.set_epena(false);
-                            w.set_usbaep(false);
-                            w.set_eptyp(to_eptyp(ep.ep_type));
-                            w.set_mpsiz(ep.max_packet_size);
-                        });
-                    }
-                }
+                });
             }
         }
 
@@ -574,8 +544,6 @@ impl<'d, T: Instance> Bus<'d, T> {
             // OUT interrupts not used, handled in RXFLVL
             // w.set_oepm(ep_irq_mask(&self.ep_out));
         });
-
-        trace!("bus configure done");
     }
 }
 
@@ -595,7 +563,8 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
             if ints.usbrst() {
                 trace!("reset");
 
-                self.configure();
+                self.init_fifo();
+                self.configure_endpoints();
 
                 // Reset address
                 r.dcfg().modify(|w| {
@@ -687,20 +656,16 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
             return;
         }
 
-        let regs = T::regs();
+        let r = T::regs();
         match ep_addr.direction() {
             Direction::Out => unsafe {
-                regs.doepctl(ep_addr.index()).modify(|w| {
-                    w.set_epena(enabled);
+                r.doepctl(ep_addr.index()).modify(|w| {
                     w.set_usbaep(enabled);
-                    w.set_cnak(true);
                 })
             },
             Direction::In => unsafe {
-                regs.diepctl(ep_addr.index()).modify(|w| {
-                    w.set_epena(enabled);
+                r.diepctl(ep_addr.index()).modify(|w| {
                     w.set_usbaep(enabled);
-                    w.set_cnak(true);
                 })
             },
         }
