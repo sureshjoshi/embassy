@@ -706,7 +706,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
             #[cfg(stm32l4)]
             {
                 crate::peripherals::PWR::enable();
-                pac::PWR.cr2().modify(|w| w.set_usv(true));
+                crate::pac::PWR.cr2().modify(|w| w.set_usv(true));
             }
 
             <T as RccPeripheral>::enable();
@@ -799,7 +799,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
         #[cfg(stm32l4)]
         unsafe {
-            pac::PWR.cr2().modify(|w| w.set_usv(false));
+            crate::pac::PWR.cr2().modify(|w| w.set_usv(false));
             // Cannot disable PWR, because other peripherals might be using it
         }
 

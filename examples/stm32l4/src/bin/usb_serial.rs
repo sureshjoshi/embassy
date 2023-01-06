@@ -2,48 +2,45 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-use defmt::panic;
-use defmt::*;
+use defmt::{panic, *};
 use defmt_rtt as _; // global logger
-use embassy::executor::Spawner;
-use embassy_stm32::interrupt;
+use embassy_executor::Spawner;
 use embassy_stm32::rcc::*;
-use embassy_stm32::time::Hertz;
 use embassy_stm32::usb_otg::{Driver, Instance};
-use embassy_stm32::{Config, Peripherals};
+use embassy_stm32::{interrupt, Config};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::Builder;
-use embassy_usb_serial::{CdcAcmClass, State};
 use futures::future::join;
 use panic_probe as _;
 
-fn config() -> Config {
-    let mut config = Config::default();
-    config.rcc.mux = ClockSrc::HSE(Hertz(16_000_000));
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    info!("Hello World!");
 
-    config.rcc.mux = ClockSrc::PLL(
-        PLLSource::HSI16,
-        PLLClkDiv::Div2,
-        PLLSrcDiv::Div1,
-        PLLMul::Mul10,
-        None,
-    );
+    let mut config = Config::default();
+    config.rcc.mux = ClockSrc::PLL(PLLSource::HSI16, PLLClkDiv::Div2, PLLSrcDiv::Div1, PLLMul::Mul10, None);
     config.rcc.hsi48 = true;
 
-    config
-}
-
-#[embassy::main(config = "config()")]
-async fn main(_spawner: Spawner, p: Peripherals) {
-    info!("Hello World!");
+    let p = embassy_stm32::init(config);
 
     // Create the driver, from the HAL.
     let irq = interrupt::take!(OTG_FS);
-    let driver = Driver::new_fs(p.USB_OTG_FS, irq, p.PA12, p.PA11);
+    let mut ep_out_buffer = [0u8; 256];
+    let driver = Driver::new_fs(p.USB_OTG_FS, irq, p.PA12, p.PA11, &mut ep_out_buffer);
 
     // Create embassy-usb Config
-    let config = embassy_usb::Config::new(0xc0de, 0xcafe);
-    //config.max_packet_size_0 = 64;
+    let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
+    config.manufacturer = Some("Embassy");
+    config.product = Some("USB-serial example");
+    config.serial_number = Some("12345678");
+
+    // Required for windows compatiblity.
+    // https://developer.nordicsemi.com/nRF_Connect_SDK/doc/1.9.1/kconfig/CONFIG_CDC_ACM_IAD.html#help
+    config.device_class = 0xEF;
+    config.device_sub_class = 0x02;
+    config.device_protocol = 0x01;
+    config.composite_with_iads = true;
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     // It needs some buffers for building the descriptors.
@@ -99,9 +96,7 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-async fn echo<'d, T: Instance + 'd>(
-    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
-) -> Result<(), Disconnected> {
+async fn echo<'d, T: Instance + 'd>(class: &mut CdcAcmClass<'d, Driver<'d, T>>) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
         let n = class.read_packet(&mut buf).await?;
