@@ -18,13 +18,6 @@ use crate::pac::otgfs::{regs, vals};
 use crate::rcc::sealed::RccPeripheral;
 use crate::time::Hertz;
 
-// const EP_COUNT: usize = 6; // TODO unhardcode
-
-// const NEW_AW: AtomicWaker = AtomicWaker::new();
-// static BUS_WAKER: AtomicWaker = AtomicWaker::new();
-// static EP_IN_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
-// static EP_OUT_WAKERS: [AtomicWaker; EP_COUNT] = [NEW_AW; EP_COUNT];
-
 macro_rules! config_ulpi_pins {
     ($($pin:ident),*) => {
         into_ref!($($pin),*);
@@ -45,8 +38,6 @@ macro_rules! config_ulpi_pins {
 // The following numbers are pessimistic and were figured out empirically.
 const RX_FIFO_EXTRA_SIZE_WORDS: u16 = 30;
 
-const EP_OUT_BUFFER_EMPTY: u16 = u16::MAX;
-
 /// USB PHY type
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PhyType {
@@ -61,6 +52,9 @@ pub enum PhyType {
     /// External ULPI High-Speed PHY
     ExternalHighSpeed,
 }
+
+/// Indicates that [State::ep_out_buffers] is empty.
+const EP_OUT_BUFFER_EMPTY: u16 = u16::MAX;
 
 pub struct State<const EP_COUNT: usize> {
     /// Holds received SETUP packets. Available if [ep0_setup_ready] is true.
