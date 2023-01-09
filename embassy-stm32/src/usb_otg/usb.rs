@@ -182,6 +182,8 @@ impl<'d, T: Instance> Driver<'d, T> {
         ulpi_d7: impl Peripheral<P = impl UlpiD7Pin<T>> + 'd,
         ep_out_buffer: &'d mut [u8],
     ) -> Self {
+        assert!(T::HIGH_SPEED == true, "Peripheral is not capable of high-speed USB");
+
         config_ulpi_pins!(
             ulpi_clk, ulpi_dir, ulpi_nxt, ulpi_stp, ulpi_d0, ulpi_d1, ulpi_d2, ulpi_d3, ulpi_d4, ulpi_d5, ulpi_d6,
             ulpi_d7
@@ -699,7 +701,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
     }
 
     fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
-        trace!("endpoint_set_stalled ep={:x} en={}", ep_addr, stalled);
+        trace!("endpoint_set_stalled ep={} en={}", ep_addr, stalled);
 
         assert!(
             ep_addr.index() < T::ENDPOINT_COUNT,
@@ -749,7 +751,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
     }
 
     fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
-        trace!("endpoint_set_enabled ep={:x} en={}", ep_addr, enabled);
+        trace!("endpoint_set_enabled ep={} en={}", ep_addr, enabled);
 
         assert!(
             ep_addr.index() < T::ENDPOINT_COUNT,
@@ -856,7 +858,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                         w.set_bvaloval(true);
                     });
                 }
-                _ => defmt::unimplemented!("Unknown USB core id {:X}", core_id),
+                _ => unimplemented!("Unknown USB core id {:X}", core_id),
             }
 
             // Soft disconnect.
