@@ -19,6 +19,7 @@ pub(crate) mod sealed {
         const ENDPOINT_COUNT: usize;
 
         fn regs() -> crate::pac::otgfs::OtgFs;
+        #[cfg(feature = "nightly")]
         fn state() -> &'static State<MAX_EP_COUNT>;
     }
 }
@@ -94,6 +95,7 @@ foreach_interrupt!(
                 crate::pac::$inst
             }
 
+            #[cfg(feature = "nightly")]
             fn state() -> &'static State<MAX_EP_COUNT> {
                 static STATE: State<MAX_EP_COUNT> = State::new();
                 &STATE
@@ -142,6 +144,7 @@ foreach_interrupt!(
                 crate::pac::otgfs::OtgFs(crate::pac::$inst.0)
             }
 
+            #[cfg(feature = "nightly")]
             fn state() -> &'static State<MAX_EP_COUNT> {
                 static STATE: State<MAX_EP_COUNT> = State::new();
                 &STATE
