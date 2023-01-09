@@ -181,130 +181,146 @@ impl<'d, T: Instance> Driver<'d, T> {
     }
 
     fn on_interrupt(_: *mut ()) {
-        unsafe {
-            trace!("irq");
-            let r = T::regs();
-            let state = T::state();
+        trace!("irq");
+        let r = T::regs();
+        let state = T::state();
 
-            let ints = r.gintsts().read();
-            if ints.wkupint() || ints.usbsusp() || ints.usbrst() || ints.enumdne() {
-                r.gintmsk().write(|_| {});
-                T::state().bus_waker.wake();
-            }
+        // SAFETY: atomic read/write
+        let ints = unsafe { r.gintsts().read() };
+        if ints.wkupint() || ints.usbsusp() || ints.usbrst() || ints.enumdne() {
+            // Mask interrupts and notify `Bus` to process them
+            unsafe { r.gintmsk().write(|_| {}) };
+            T::state().bus_waker.wake();
+        }
 
-            if ints.rxflvl() {
-                let status = r.grxstsp().read();
-                let ep_num = status.epnum() as usize;
-                let len = status.bcnt() as usize;
+        // Handle RX
+        // SAFETY: atomic read with no side effects
+        while unsafe { r.gintsts().read().rxflvl() } {
+            // SAFETY: atomic "pop" register
+            let status = unsafe { r.grxstsp().read() };
+            let ep_num = status.epnum() as usize;
+            let len = status.bcnt() as usize;
 
-                assert!(ep_num < T::ENDPOINT_COUNT);
+            assert!(ep_num < T::ENDPOINT_COUNT);
 
-                match status.pktstsd() {
-                    vals::Pktstsd::SETUP_DATA_RX => {
-                        trace!("SETUP_DATA_RX");
-                        assert!(len == 8, "invalid SETUP packet length={}", len);
-                        assert!(ep_num == 0, "invalid SETUP packet endpoint={}", ep_num);
+            match status.pktstsd() {
+                vals::Pktstsd::SETUP_DATA_RX => {
+                    trace!("SETUP_DATA_RX");
+                    assert!(len == 8, "invalid SETUP packet length={}", len);
+                    assert!(ep_num == 0, "invalid SETUP packet endpoint={}", ep_num);
 
-                        if state.ep0_setup_ready.load(Ordering::Relaxed) == false {
-                            let data = &mut *state.ep0_setup_data.get();
+                    if state.ep0_setup_ready.load(Ordering::Relaxed) == false {
+                        // SAFETY: exclusive access ensured by atomic bool
+                        let data = unsafe { &mut *state.ep0_setup_data.get() };
+                        // SAFETY: FIFO reads are exclusive to this IRQ
+                        unsafe {
                             data[0..4].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
                             data[4..8].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
-                            state.ep0_setup_ready.store(true, Ordering::Release);
-                            state.ep_out_wakers[0].wake();
-                        } else {
-                            error!("received SETUP before previous finished processing");
-                            // discard FIFO
+                        }
+                        state.ep0_setup_ready.store(true, Ordering::Release);
+                        state.ep_out_wakers[0].wake();
+                    } else {
+                        error!("received SETUP before previous finished processing");
+                        // discard FIFO
+                        // SAFETY: FIFO reads are exclusive to IRQ
+                        unsafe {
                             r.fifo(0).read();
                             r.fifo(0).read();
                         }
                     }
-                    vals::Pktstsd::OUT_DATA_RX => {
-                        trace!("OUT_DATA_RX ep={} len={}", ep_num, len);
-
-                        if state.ep_out_size[ep_num].load(Ordering::Acquire) == EP_OUT_BUFFER_EMPTY {
-                            // Buffer size is allocated to be equal to endpoint's maximum packet size
-                            // We trust the peripheral to not exceed its configured MPSIZ
-                            let buf = core::slice::from_raw_parts_mut(*state.ep_out_buffers[ep_num].get(), len);
-
-                            for chunk in buf.chunks_mut(4) {
-                                // RX FIFO is shared so always read from fifo(0)
-                                let data = r.fifo(0).read().0;
-                                chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
-                            }
-
-                            state.ep_out_size[ep_num].store(len as u16, Ordering::Release);
-                            state.ep_out_wakers[ep_num].wake();
-                        } else {
-                            error!("ep_out buffer overflow index={}", ep_num);
-
-                            // discard FIFO data
-                            let len_words = (len + 3) / 4;
-                            for _ in 0..len_words {
-                                r.fifo(0).read().data();
-                            }
-                        }
-                    }
-                    vals::Pktstsd::OUT_DATA_DONE => {
-                        trace!("OUT_DATA_DONE ep={}", ep_num);
-                    }
-                    vals::Pktstsd::SETUP_DATA_DONE => {
-                        trace!("SETUP_DATA_DONE ep={}", ep_num);
-                    }
-                    x => trace!("unknown PKTSTS: {}", x.0),
                 }
-            }
+                vals::Pktstsd::OUT_DATA_RX => {
+                    trace!("OUT_DATA_RX ep={} len={}", ep_num, len);
 
-            // IN endpoint interrupt
-            if ints.iepint() {
-                let mut ep_mask = r.daint().read().iepint();
-                let mut ep_num = 0;
+                    if state.ep_out_size[ep_num].load(Ordering::Acquire) == EP_OUT_BUFFER_EMPTY {
+                        // SAFETY: Buffer size is allocated to be equal to endpoint's maximum packet size
+                        // We trust the peripheral to not exceed its configured MPSIZ
+                        let buf = unsafe { core::slice::from_raw_parts_mut(*state.ep_out_buffers[ep_num].get(), len) };
 
-                // Iterate over endpoints while there are non-zero bits in the mask
-                while ep_mask != 0 {
-                    if ep_mask & 1 != 0 {
-                        let ep_ints = r.diepint(ep_num).read();
-
-                        // clear all
-                        r.diepint(ep_num).write_value(ep_ints);
-
-                        // TXFE is cleared in DIEPEMPMSK
-                        if ep_ints.txfe() {
-                            critical_section::with(|_| {
-                                r.diepempmsk().modify(|w| {
-                                    w.set_ineptxfem(w.ineptxfem() & !(1 << ep_num));
-                                });
-                            });
+                        for chunk in buf.chunks_mut(4) {
+                            // RX FIFO is shared so always read from fifo(0)
+                            // SAFETY: FIFO reads are exclusive to IRQ
+                            let data = unsafe { r.fifo(0).read().0 };
+                            chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
                         }
 
-                        state.ep_in_wakers[ep_num].wake();
-                        trace!("in ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+                        state.ep_out_size[ep_num].store(len as u16, Ordering::Release);
+                        state.ep_out_wakers[ep_num].wake();
+                    } else {
+                        error!("ep_out buffer overflow index={}", ep_num);
+
+                        // discard FIFO data
+                        let len_words = (len + 3) / 4;
+                        for _ in 0..len_words {
+                            // SAFETY: FIFO reads are exclusive to IRQ
+                            unsafe { r.fifo(0).read().data() };
+                        }
                     }
-
-                    ep_mask >>= 1;
-                    ep_num += 1;
                 }
+                vals::Pktstsd::OUT_DATA_DONE => {
+                    trace!("OUT_DATA_DONE ep={}", ep_num);
+                }
+                vals::Pktstsd::SETUP_DATA_DONE => {
+                    trace!("SETUP_DATA_DONE ep={}", ep_num);
+                }
+                x => trace!("unknown PKTSTS: {}", x.0),
             }
-
-            // not needed? reception handled in rxflvl
-            // OUT endpoint interrupt
-            // if ints.oepint() {
-            //     let mut ep_mask = r.daint().read().oepint();
-            //     let mut ep_num = 0;
-
-            //     while ep_mask != 0 {
-            //         if ep_mask & 1 != 0 {
-            //             let ep_ints = r.doepint(ep_num).read();
-            //             // clear all
-            //             r.doepint(ep_num).write_value(ep_ints);
-            //             state.ep_out_wakers[ep_num].wake();
-            //             trace!("out ep={} irq val={=u32:b}", ep_num, ep_ints.0);
-            //         }
-
-            //         ep_mask >>= 1;
-            //         ep_num += 1;
-            //     }
-            // }
         }
+
+        // IN endpoint interrupt
+        if ints.iepint() {
+            // SAFETY: atomic read with no side effects
+            let mut ep_mask = unsafe { r.daint().read().iepint() };
+            let mut ep_num = 0;
+
+            // Iterate over endpoints while there are non-zero bits in the mask
+            while ep_mask != 0 {
+                if ep_mask & 1 != 0 {
+                    // SAFETY: atomic read with no side effects
+                    let ep_ints = unsafe { r.diepint(ep_num).read() };
+
+                    // clear all
+                    // SAFETY: DIEPINT is exclusive to IRQ
+                    unsafe { r.diepint(ep_num).write_value(ep_ints) };
+
+                    // TXFE is cleared in DIEPEMPMSK
+                    if ep_ints.txfe() {
+                        // SAFETY: DIEPEMPMSK is shared with `Endpoint` so critical section is needed for RMW
+                        critical_section::with(|_| unsafe {
+                            r.diepempmsk().modify(|w| {
+                                w.set_ineptxfem(w.ineptxfem() & !(1 << ep_num));
+                            });
+                        });
+                    }
+
+                    state.ep_in_wakers[ep_num].wake();
+                    trace!("in ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+                }
+
+                ep_mask >>= 1;
+                ep_num += 1;
+            }
+        }
+
+        // not needed? reception handled in rxflvl
+        // OUT endpoint interrupt
+        // if ints.oepint() {
+        //     let mut ep_mask = r.daint().read().oepint();
+        //     let mut ep_num = 0;
+
+        //     while ep_mask != 0 {
+        //         if ep_mask & 1 != 0 {
+        //             let ep_ints = r.doepint(ep_num).read();
+        //             // clear all
+        //             r.doepint(ep_num).write_value(ep_ints);
+        //             state.ep_out_wakers[ep_num].wake();
+        //             trace!("out ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+        //         }
+
+        //         ep_mask >>= 1;
+        //         ep_num += 1;
+        //     }
+        // }
     }
 
     // Returns total amount of words (u32) allocated in dedicated FIFO
@@ -459,9 +475,9 @@ pub struct Bus<'d, T: Instance> {
 
 impl<'d, T: Instance> Bus<'d, T> {
     fn restore_irqs() {
-        let r = T::regs();
+        // SAFETY: atomic write
         unsafe {
-            r.gintmsk().write(|w| {
+            T::regs().gintmsk().write(|w| {
                 w.set_usbrst(true);
                 w.set_enumdnem(true);
                 w.set_usbsuspm(true);
@@ -475,15 +491,17 @@ impl<'d, T: Instance> Bus<'d, T> {
 }
 
 impl<'d, T: Instance> Bus<'d, T> {
-    pub unsafe fn init_fifo(&mut self) {
+    pub fn init_fifo(&mut self) {
         trace!("init_fifo");
 
         let r = T::regs();
 
         // Configure RX fifo size. All endpoints share the same FIFO area.
         let rx_fifo_size_words = RX_FIFO_EXTRA_SIZE_WORDS + ep_fifo_size(&self.ep_out);
-        r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words));
         trace!("configuring rx fifo size={}", rx_fifo_size_words);
+
+        // SAFETY: register is exclusive to `Bus` with `&mut self`
+        unsafe { r.grxfsiz().modify(|w| w.set_rxfd(rx_fifo_size_words)) };
 
         // Configure TX (USB in direction) fifo size for each endpoint
         let mut fifo_top = rx_fifo_size_words;
@@ -497,10 +515,14 @@ impl<'d, T: Instance> Bus<'d, T> {
                 );
 
                 let dieptxf = if i == 0 { r.dieptxf0() } else { r.dieptxf(i - 1) };
-                dieptxf.write(|w| {
-                    w.set_fd(ep.fifo_size_words);
-                    w.set_sa(fifo_top);
-                });
+
+                // SAFETY: register is exclusive to `Bus` with `&mut self`
+                unsafe {
+                    dieptxf.write(|w| {
+                        w.set_fd(ep.fifo_size_words);
+                        w.set_sa(fifo_top);
+                    });
+                }
 
                 fifo_top += ep.fifo_size_words;
             }
@@ -512,7 +534,7 @@ impl<'d, T: Instance> Bus<'d, T> {
         );
     }
 
-    pub unsafe fn configure_endpoints(&mut self) {
+    pub fn configure_endpoints(&mut self) {
         trace!("configure_endpoints");
 
         let r = T::regs();
@@ -520,14 +542,17 @@ impl<'d, T: Instance> Bus<'d, T> {
         // Configure IN endpoints
         for (index, ep) in self.ep_in.iter().enumerate() {
             if let Some(ep) = ep {
-                r.diepctl(index).write(|w| {
-                    if index == 0 {
-                        w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
-                    } else {
-                        w.set_mpsiz(ep.max_packet_size);
-                        w.set_eptyp(to_eptyp(ep.ep_type));
-                        w.set_sd0pid_sevnfrm(true);
-                    }
+                // SAFETY: DIEPCTL is shared with `Endpoint` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    r.diepctl(index).write(|w| {
+                        if index == 0 {
+                            w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
+                        } else {
+                            w.set_mpsiz(ep.max_packet_size);
+                            w.set_eptyp(to_eptyp(ep.ep_type));
+                            w.set_sd0pid_sevnfrm(true);
+                        }
+                    });
                 });
             }
         }
@@ -535,30 +560,36 @@ impl<'d, T: Instance> Bus<'d, T> {
         // Configure OUT endpoints
         for (index, ep) in self.ep_out.iter().enumerate() {
             if let Some(ep) = ep {
-                r.doepctl(index).write(|w| {
-                    if index == 0 {
-                        w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
-                    } else {
-                        w.set_mpsiz(ep.max_packet_size);
-                        w.set_eptyp(to_eptyp(ep.ep_type));
-                        w.set_sd0pid_sevnfrm(true);
-                    }
+                // SAFETY: DOEPCTL is shared with `Endpoint` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    r.doepctl(index).write(|w| {
+                        if index == 0 {
+                            w.set_mpsiz(ep0_mpsiz(ep.max_packet_size));
+                        } else {
+                            w.set_mpsiz(ep.max_packet_size);
+                            w.set_eptyp(to_eptyp(ep.ep_type));
+                            w.set_sd0pid_sevnfrm(true);
+                        }
+                    });
                 });
             }
         }
 
         // Enable IRQs for allocated endpoints
-        r.daintmsk().modify(|w| {
-            w.set_iepm(ep_irq_mask(&self.ep_in));
-            // OUT interrupts not used, handled in RXFLVL
-            // w.set_oepm(ep_irq_mask(&self.ep_out));
-        });
+        // SAFETY: register is exclusive to `Bus` with `&mut self`
+        unsafe {
+            r.daintmsk().modify(|w| {
+                w.set_iepm(ep_irq_mask(&self.ep_in));
+                // OUT interrupts not used, handled in RXFLVL
+                // w.set_oepm(ep_irq_mask(&self.ep_out));
+            });
+        }
     }
 }
 
 impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
     async fn poll(&mut self) -> Event {
-        poll_fn(move |cx| unsafe {
+        poll_fn(move |cx| {
             // TODO: implement VBUS detection
             if !self.enabled {
                 return Poll::Ready(Event::PowerDetected);
@@ -568,7 +599,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
             T::state().bus_waker.register(cx.waker());
 
-            let ints = r.gintsts().read();
+            let ints = unsafe { r.gintsts().read() };
             if ints.usbrst() {
                 trace!("reset");
 
@@ -576,25 +607,34 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                 self.configure_endpoints();
 
                 // Reset address
-                r.dcfg().modify(|w| {
-                    w.set_dad(0);
+                // SAFETY: DCFG is shared with `ControlPipe` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    r.dcfg().modify(|w| {
+                        w.set_dad(0);
+                    });
                 });
 
-                r.gintsts().write(|w| w.set_usbrst(true)); // clear
+                // SAFETY: atomic clear on rc_w1 register
+                unsafe { r.gintsts().write(|w| w.set_usbrst(true)) }; // clear
                 Self::restore_irqs();
             }
 
             if ints.enumdne() {
                 trace!("enumdne");
 
-                let speed = r.dsts().read().enumspd();
+                // SAFETY: atomic read with no side effects
+                let speed = unsafe { r.dsts().read().enumspd() };
                 trace!("  speed={}", speed.0);
 
-                r.gusbcfg().modify(|w| {
-                    w.set_trdt(calculate_trdt(speed, T::frequency()));
-                });
+                // SAFETY: register is only accessed by `Bus` under `&mut self`
+                unsafe {
+                    r.gusbcfg().modify(|w| {
+                        w.set_trdt(calculate_trdt(speed, T::frequency()));
+                    })
+                };
 
-                r.gintsts().write(|w| w.set_enumdne(true)); // clear
+                // SAFETY: atomic clear on rc_w1 register
+                unsafe { r.gintsts().write(|w| w.set_enumdne(true)) }; // clear
                 Self::restore_irqs();
 
                 return Poll::Ready(Event::Reset);
@@ -602,14 +642,16 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
             if ints.usbsusp() {
                 trace!("suspend");
-                r.gintsts().write(|w| w.set_usbsusp(true)); // clear
+                // SAFETY: atomic clear on rc_w1 register
+                unsafe { r.gintsts().write(|w| w.set_usbsusp(true)) }; // clear
                 Self::restore_irqs();
                 return Poll::Ready(Event::Suspend);
             }
 
             if ints.wkupint() {
                 trace!("resume");
-                r.gintsts().write(|w| w.set_wkupint(true)); // clear
+                // SAFETY: atomic clear on rc_w1 register
+                unsafe { r.gintsts().write(|w| w.set_wkupint(true)) }; // clear
                 Self::restore_irqs();
                 return Poll::Ready(Event::Resume);
             }
@@ -630,18 +672,26 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
         let regs = T::regs();
         match ep_addr.direction() {
-            Direction::Out => unsafe {
-                regs.doepctl(ep_addr.index()).modify(|w| {
-                    w.set_stall(stalled);
+            Direction::Out => {
+                // SAFETY: DOEPCTL is shared with `Endpoint` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    regs.doepctl(ep_addr.index()).modify(|w| {
+                        w.set_stall(stalled);
+                    });
                 });
+
                 T::state().ep_out_wakers[ep_addr.index()].wake();
-            },
-            Direction::In => unsafe {
-                regs.diepctl(ep_addr.index()).modify(|w| {
-                    w.set_stall(stalled);
+            }
+            Direction::In => {
+                // SAFETY: DIEPCTL is shared with `Endpoint` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    regs.diepctl(ep_addr.index()).modify(|w| {
+                        w.set_stall(stalled);
+                    });
                 });
+
                 T::state().ep_in_wakers[ep_addr.index()].wake();
-            },
+            }
         }
     }
 
@@ -653,6 +703,8 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
         );
 
         let regs = T::regs();
+
+        // SAFETY: atomic read with no side effects
         match ep_addr.direction() {
             Direction::Out => unsafe { regs.doepctl(ep_addr.index()).read().stall() },
             Direction::In => unsafe { regs.diepctl(ep_addr.index()).read().stall() },
@@ -670,38 +722,45 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
 
         let r = T::regs();
         match ep_addr.direction() {
-            Direction::Out => unsafe {
-                // cancel transfer if active
-                if !enabled && r.doepctl(ep_addr.index()).read().epena() {
-                    r.doepctl(ep_addr.index()).modify(|w| {
-                        w.set_snak(true);
-                        w.set_epdis(true);
-                    })
-                }
+            Direction::Out => {
+                // SAFETY: DOEPCTL is shared with `Endpoint` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    // cancel transfer if active
+                    if !enabled && r.doepctl(ep_addr.index()).read().epena() {
+                        r.doepctl(ep_addr.index()).modify(|w| {
+                            w.set_snak(true);
+                            w.set_epdis(true);
+                        })
+                    }
 
-                r.doepctl(ep_addr.index()).modify(|w| {
-                    w.set_usbaep(enabled);
-                })
-            },
-            Direction::In => unsafe {
-                // cancel transfer if active
-                if !enabled && r.doepctl(ep_addr.index()).read().epena() {
                     r.doepctl(ep_addr.index()).modify(|w| {
-                        w.set_snak(true);
-                        w.set_epdis(true);
+                        w.set_usbaep(enabled);
                     })
-                }
+                });
+            }
+            Direction::In => {
+                // SAFETY: DIEPCTL is shared with `Endpoint` so critical section is needed for RMW
+                critical_section::with(|_| unsafe {
+                    // cancel transfer if active
+                    if !enabled && r.diepctl(ep_addr.index()).read().epena() {
+                        r.diepctl(ep_addr.index()).modify(|w| {
+                            w.set_snak(true);
+                            w.set_epdis(true);
+                        })
+                    }
 
-                r.diepctl(ep_addr.index()).modify(|w| {
-                    w.set_usbaep(enabled);
-                })
-            },
+                    r.diepctl(ep_addr.index()).modify(|w| {
+                        w.set_usbaep(enabled);
+                    })
+                });
+            }
         }
     }
 
     async fn enable(&mut self) {
         trace!("enable");
 
+        // SAFETY: registers are only accessed by `Bus` under `&mut self`
         unsafe {
             #[cfg(stm32l4)]
             {
@@ -871,11 +930,14 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointOut for Endpoint<'d, T, Out> {
                 // SAFETY: exclusive access ensured by `ep_out_size` atomic variable
                 let data = unsafe { core::slice::from_raw_parts(*state.ep_out_buffers[index].get(), len as usize) };
                 buf[..len as usize].copy_from_slice(data);
-                state.ep_out_size[index].store(u16::MAX, Ordering::Release);
+
+                // Release buffer
+                state.ep_out_size[index].store(EP_OUT_BUFFER_EMPTY, Ordering::Release);
 
                 Poll::Ready(Ok(len as usize))
             } else {
-                unsafe {
+                // SAFETY: DOEPCTL is shared with `Bus` so a critical section is needed for RMW
+                critical_section::with(|_| unsafe {
                     // Enable endpoint if not enabled
                     if !T::regs().doepctl(index).read().epena() {
                         T::regs().doepctl(index).modify(|w| {
@@ -883,7 +945,7 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointOut for Endpoint<'d, T, Out> {
                             w.set_epena(true);
                         });
                     }
-                };
+                });
 
                 Poll::Pending
             }
@@ -906,6 +968,7 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointIn for Endpoint<'d, T, In> {
         poll_fn(|cx| {
             state.ep_in_wakers[index].register(cx.waker());
 
+            // SAFETY: atomic read with no side effects
             if unsafe { r.diepctl(index).read().epena() } {
                 Poll::Pending
             } else {
@@ -919,9 +982,12 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointIn for Endpoint<'d, T, In> {
                 state.ep_in_wakers[index].register(cx.waker());
 
                 let size_words = (buf.len() + 3) / 4;
+
+                // SAFETY: atomic read with no side effects
                 let fifo_space = unsafe { r.dtxfsts(index).read().ineptfsav() as usize };
                 if size_words > fifo_space {
-                    // not enough space in fifo, enable tx fifo empty interrupt
+                    // Not enough space in fifo, enable tx fifo empty interrupt
+                    // SAFETY: DIEPEMPMSK is shared with IRQ so critical section is needed for RMW
                     critical_section::with(|_| unsafe {
                         r.diepempmsk().modify(|w| {
                             w.set_ineptxfem(w.ineptxfem() | (1 << index));
@@ -938,6 +1004,7 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointIn for Endpoint<'d, T, In> {
             .await
         }
 
+        // SAFETY: DIEPTSIZ is exclusive to this endpoint under `&mut self`
         unsafe {
             // Setup transfer size
             r.dieptsiz(index).write(|w| {
@@ -945,19 +1012,23 @@ impl<'d, T: Instance> embassy_usb_driver::EndpointIn for Endpoint<'d, T, In> {
                 w.set_pktcnt(1);
                 w.set_xfrsiz(buf.len() as _);
             });
+        }
 
+        // SAFETY: DIEPCTL is shared with `Bus` so a critical section is needed for RMW
+        critical_section::with(|_| unsafe {
             // Enable endpoint
             r.diepctl(index).modify(|w| {
                 w.set_cnak(true);
                 w.set_epena(true);
             });
+        });
 
-            // Write data to FIFO
-            for chunk in buf.chunks(4) {
-                let mut tmp = [0u8; 4];
-                tmp[0..chunk.len()].copy_from_slice(chunk);
-                r.fifo(index).write_value(regs::Fifo(u32::from_ne_bytes(tmp)));
-            }
+        // Write data to FIFO
+        for chunk in buf.chunks(4) {
+            let mut tmp = [0u8; 4];
+            tmp[0..chunk.len()].copy_from_slice(chunk);
+            // SAFETY: FIFO is exclusive to this endpoint under `&mut self`
+            unsafe { r.fifo(index).write_value(regs::Fifo(u32::from_ne_bytes(tmp))) };
         }
 
         trace!("WRITE OK");
@@ -993,12 +1064,13 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
             } else {
                 trace!("SETUP waiting");
 
-                critical_section::with(|_| unsafe {
+                // EP0 should not be controlled by `Bus` so this RMW does not need a critical section
+                unsafe {
                     T::regs().doepctl(self.ep_out.info.addr.index()).modify(|w| {
                         w.set_cnak(true);
                         w.set_epena(true);
                     })
-                });
+                };
 
                 Poll::Pending
             }
@@ -1038,6 +1110,7 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
     async fn reject(&mut self) {
         trace!("control: reject");
 
+        // EP0 should not be controlled by `Bus` so this RMW does not need a critical section
         unsafe {
             let regs = T::regs();
             regs.diepctl(self.ep_in.info.addr.index()).modify(|w| {
@@ -1051,11 +1124,11 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
 
     async fn accept_set_address(&mut self, addr: u8) {
         trace!("setting addr: {}", addr);
-        unsafe {
+        critical_section::with(|_| unsafe {
             T::regs().dcfg().modify(|w| {
                 w.set_dad(addr);
             });
-        }
+        });
 
         // synopsys driver requires accept to be sent after changing address
         self.accept().await
