@@ -602,7 +602,7 @@ impl<'d, T: Instance> Bus<'d, T> {
                     }
 
                     state.ep_in_wakers[ep_num].wake();
-                    trace!("in ep={} irq val={=u32:b}", ep_num, ep_ints.0);
+                    trace!("in ep={} irq val={:b}", ep_num, ep_ints.0);
                 }
 
                 ep_mask >>= 1;
@@ -707,7 +707,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
     }
 
     fn endpoint_set_stalled(&mut self, ep_addr: EndpointAddress, stalled: bool) {
-        trace!("endpoint_set_stalled ep={} en={}", ep_addr, stalled);
+        trace!("endpoint_set_stalled ep={:?} en={}", ep_addr, stalled);
 
         assert!(
             ep_addr.index() < T::ENDPOINT_COUNT,
@@ -757,7 +757,7 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
     }
 
     fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
-        trace!("endpoint_set_enabled ep={} en={}", ep_addr, enabled);
+        trace!("endpoint_set_enabled ep={:?} en={}", ep_addr, enabled);
 
         assert!(
             ep_addr.index() < T::ENDPOINT_COUNT,
@@ -1127,7 +1127,7 @@ impl<'d, T: Instance> embassy_usb_driver::ControlPipe for ControlPipe<'d, T> {
     async fn data_out(&mut self, buf: &mut [u8], _first: bool, _last: bool) -> Result<usize, EndpointError> {
         trace!("control: data_out");
         let len = self.ep_out.read(buf).await?;
-        trace!("control: data_out read: {:?}", buf[..len]);
+        trace!("control: data_out read: {:?}", &buf[..len]);
         Ok(len)
     }
 
