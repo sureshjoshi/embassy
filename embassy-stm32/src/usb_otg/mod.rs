@@ -8,7 +8,7 @@ use embassy_cortex_m::interrupt::Interrupt;
 pub use usb::*;
 
 // Using Instance::ENDPOINT_COUNT requires feature(const_generic_expr)
-const MAX_EP_COUNT: usize = 8;
+const MAX_EP_COUNT: usize = 9;
 
 pub(crate) mod sealed {
     use super::*;
