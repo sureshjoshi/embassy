@@ -81,13 +81,13 @@ impl PhyType {
 const EP_OUT_BUFFER_EMPTY: u16 = u16::MAX;
 
 pub struct State<const EP_COUNT: usize> {
-    /// Holds received SETUP packets. Available if [ep0_setup_ready] is true.
+    /// Holds received SETUP packets. Available if [State::ep0_setup_ready] is true.
     ep0_setup_data: UnsafeCell<[u8; 8]>,
     ep0_setup_ready: AtomicBool,
     ep_in_wakers: [AtomicWaker; EP_COUNT],
     ep_out_wakers: [AtomicWaker; EP_COUNT],
     /// RX FIFO is shared so extra buffers are needed to dequeue all data without waiting on each endpoint.
-    /// Buffers are ready when associated [ep_out_size] != [EP_OUT_BUFFER_EMPTY].
+    /// Buffers are ready when associated [State::ep_out_size] != [EP_OUT_BUFFER_EMPTY].
     ep_out_buffers: [UnsafeCell<*mut u8>; EP_COUNT],
     ep_out_size: [AtomicU16; EP_COUNT],
     bus_waker: AtomicWaker,
@@ -134,7 +134,10 @@ pub struct Driver<'d, T: Instance> {
 impl<'d, T: Instance> Driver<'d, T> {
     /// Initializes USB OTG peripheral with internal Full-Speed PHY.
     ///
-    /// [ep_out_buffer] must be large enough to fit all OUT endpoint max packet sizes.
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store recevied packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
     /// Endpoint allocation will fail if it is too small.
     pub fn new_fs(
         _peri: impl Peripheral<P = T> + 'd,
@@ -163,7 +166,10 @@ impl<'d, T: Instance> Driver<'d, T> {
 
     /// Initializes USB OTG peripheral with external High-Speed PHY.
     ///
-    /// [ep_out_buffer] must be large enough to fit all OUT endpoint max packet sizes.
+    /// # Arguments
+    ///
+    /// * `ep_out_buffer` - An internal buffer used to temporarily store recevied packets.
+    /// Must be large enough to fit all OUT endpoint max packet sizes.
     /// Endpoint allocation will fail if it is too small.
     pub fn new_hs_ulpi(
         _peri: impl Peripheral<P = T> + 'd,
