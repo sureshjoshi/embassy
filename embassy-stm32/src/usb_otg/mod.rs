@@ -7,12 +7,11 @@ use embassy_cortex_m::interrupt::Interrupt;
 #[cfg(feature = "nightly")]
 pub use usb::*;
 
-// Using Instance::ENDPOINT_COUNT requires feature(const_generic_expr)
+// Using Instance::ENDPOINT_COUNT requires feature(const_generic_expr) so just define maximum eps
+#[cfg(feature = "nightly")]
 const MAX_EP_COUNT: usize = 9;
 
 pub(crate) mod sealed {
-    use super::*;
-
     pub trait Instance {
         const HIGH_SPEED: bool;
         const FIFO_DEPTH_WORDS: u16;
@@ -20,7 +19,7 @@ pub(crate) mod sealed {
 
         fn regs() -> crate::pac::otgfs::OtgFs;
         #[cfg(feature = "nightly")]
-        fn state() -> &'static State<MAX_EP_COUNT>;
+        fn state() -> &'static super::State<{ super::MAX_EP_COUNT }>;
     }
 }
 
