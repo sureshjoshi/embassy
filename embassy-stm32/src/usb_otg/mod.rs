@@ -17,7 +17,7 @@ pub(crate) mod sealed {
         const FIFO_DEPTH_WORDS: u16;
         const ENDPOINT_COUNT: usize;
 
-        fn regs() -> crate::pac::otgfs::OtgFs;
+        fn regs() -> crate::pac::otg::Otg;
         #[cfg(feature = "nightly")]
         fn state() -> &'static super::State<{ super::MAX_EP_COUNT }>;
     }
@@ -46,8 +46,8 @@ pin_trait!(UlpiD6Pin, Instance);
 pin_trait!(UlpiD7Pin, Instance);
 
 foreach_interrupt!(
-    ($inst:ident, otgfs, $block:ident, GLOBAL, $irq:ident) => {
-        impl sealed::Instance for peripherals::$inst {
+    (USB_OTG_FS, otg, $block:ident, GLOBAL, $irq:ident) => {
+        impl sealed::Instance for peripherals::USB_OTG_FS {
             const HIGH_SPEED: bool = false;
 
             cfg_if::cfg_if! {
@@ -93,8 +93,8 @@ foreach_interrupt!(
                 }
             }
 
-            fn regs() -> crate::pac::otgfs::OtgFs {
-                crate::pac::$inst
+            fn regs() -> crate::pac::otg::Otg {
+                crate::pac::USB_OTG_FS
             }
 
             #[cfg(feature = "nightly")]
@@ -104,13 +104,13 @@ foreach_interrupt!(
             }
         }
 
-        impl Instance for peripherals::$inst {
+        impl Instance for peripherals::USB_OTG_FS {
             type Interrupt = crate::interrupt::$irq;
         }
     };
 
-    ($inst:ident, otghs, $block:ident, GLOBAL, $irq:ident) => {
-        impl sealed::Instance for peripherals::$inst {
+    (USB_OTG_HS, otg, $block:ident, GLOBAL, $irq:ident) => {
+        impl sealed::Instance for peripherals::USB_OTG_HS {
             const HIGH_SPEED: bool = true;
 
             cfg_if::cfg_if! {
@@ -141,9 +141,9 @@ foreach_interrupt!(
                 }
             }
 
-            fn regs() -> crate::pac::otgfs::OtgFs {
+            fn regs() -> crate::pac::otg::Otg {
                 // OTG HS registers are a superset of FS registers
-                crate::pac::otgfs::OtgFs(crate::pac::$inst.0)
+                crate::pac::otg::Otg(crate::pac::USB_OTG_HS.0)
             }
 
             #[cfg(feature = "nightly")]
@@ -153,7 +153,7 @@ foreach_interrupt!(
             }
         }
 
-        impl Instance for peripherals::$inst {
+        impl Instance for peripherals::USB_OTG_HS {
             type Interrupt = crate::interrupt::$irq;
         }
     };

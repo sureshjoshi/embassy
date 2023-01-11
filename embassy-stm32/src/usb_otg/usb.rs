@@ -14,7 +14,7 @@ use futures::future::poll_fn;
 
 use super::*;
 use crate::gpio::sealed::AFType;
-use crate::pac::otgfs::{regs, vals};
+use crate::pac::otg::{regs, vals};
 use crate::rcc::sealed::RccPeripheral;
 use crate::time::Hertz;
 
@@ -835,17 +835,18 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                 w.set_physel(self.phy_type.internal() && !self.phy_type.high_speed());
             });
 
-            r.gccfg().modify(|w| {
-                // Enable internal full-speed PHY, logic is inverted
-                w.set_pwrdwn(self.phy_type.internal() && !self.phy_type.high_speed());
-                w.set_phyhsen(self.phy_type.internal() && self.phy_type.high_speed());
-            });
-
             // Configuring Vbus sense and SOF output
             match core_id {
                 0x0000_1200 | 0x0000_1100 => {
+                    assert!(self.phy_type != PhyType::InternalHighSpeed);
+
+                    r.gccfg_v1().modify(|w| {
+                        // Enable internal full-speed PHY, logic is inverted
+                        w.set_pwrdwn(self.phy_type.internal());
+                    });
+
                     // F429-like chips have the GCCFG.NOVBUSSENS bit
-                    r.gccfg().modify(|w| {
+                    r.gccfg_v1().modify(|w| {
                         w.set_novbussens(true);
                         w.set_vbusasen(false);
                         w.set_vbusbsen(false);
@@ -854,7 +855,13 @@ impl<'d, T: Instance> embassy_usb_driver::Bus for Bus<'d, T> {
                 }
                 0x0000_2000 | 0x0000_2100 | 0x0000_2300 | 0x0000_3000 | 0x0000_3100 => {
                     // F446-like chips have the GCCFG.VBDEN bit with the opposite meaning
-                    r.gccfg().modify(|w| {
+                    r.gccfg_v2().modify(|w| {
+                        // Enable internal full-speed PHY, logic is inverted
+                        w.set_pwrdwn(self.phy_type.internal() && !self.phy_type.high_speed());
+                        w.set_phyhsen(self.phy_type.internal() && self.phy_type.high_speed());
+                    });
+
+                    r.gccfg_v2().modify(|w| {
                         w.set_vbden(false);
                     });
 
